@@ -143,11 +143,12 @@ CREATE TABLE servers (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     node_id      UUID NOT NULL REFERENCES nodes(id),
     owner_id     UUID NOT NULL REFERENCES users(id),
+    egg_id       UUID REFERENCES eggs(id),
     name         TEXT NOT NULL,
-    docker_image TEXT NOT NULL,
+    docker_image TEXT NOT NULL,   -- imagem escolhida dentre docker_images do egg
     memory_mb    INT NOT NULL,
     cpu_percent  INT NOT NULL,
-    env_vars     JSONB NOT NULL DEFAULT '{}',   -- flexível por jogo, sem schema fixo
+    env_vars     JSONB NOT NULL DEFAULT '{}',   -- valores das variáveis do egg (resolvidos)
     status       TEXT NOT NULL DEFAULT 'stopped'
         CHECK (status IN ('installing','running','stopped','error'))
 );
@@ -419,6 +420,189 @@ Roda em qualquer Linux sem glibc, sem runtime, sem dependências além do Docker
 ```
 push → cargo test (todos os crates) → cargo leptos build → docker build → release tag
 ```
+
+---
+
+## Seção 6 — Eggs: Templates de Servidor de Jogo
+
+### Conceito
+
+Eggs são templates reutilizáveis que definem tudo o que o panel e o node precisam para instalar e rodar um tipo de servidor de jogo: imagem Docker, comando de inicialização, variáveis de ambiente, script de instalação e patches de arquivos de configuração.
+
+### Formato nativo `.toml`
+
+```toml
+[egg]
+name          = "Purpur"
+author        = "purpur@birdflop.com"
+description   = "Drop-in replacement for Paper with extra configurability."
+features      = ["eula", "java_version", "pid_limit"]
+file_denylist = []
+
+[startup]
+command   = "java {{JVM_EXTRA}} -jar {{SERVER_JARFILE}}"
+stop      = "stop"
+detection = ")! For help, type "   # string nos logs que indica servidor pronto
+
+[docker_images]
+"Java 21" = "ghcr.io/ptero-eggs/yolks:java_21"
+"Java 17" = "ghcr.io/ptero-eggs/yolks:java_17"
+"Java 11" = "ghcr.io/ptero-eggs/yolks:java_11"
+"Java 8"  = "ghcr.io/ptero-eggs/yolks:java_8"
+
+[[variables]]
+name          = "Minecraft Version"
+env_variable  = "MINECRAFT_VERSION"
+description   = "The version of Minecraft to download."
+default       = "latest"
+user_viewable = true
+user_editable = true
+rules         = "required|string|max:20"
+field_type    = "text"
+
+[[variables]]
+name          = "Server Jar File"
+env_variable  = "SERVER_JARFILE"
+description   = "The name of the .jar file to run."
+default       = "server.jar"
+user_viewable = true
+user_editable = true
+rules         = "required|regex:/^([\\w\\d._-]+)(\\.jar)$/|max:80"
+field_type    = "text"
+
+[[variables]]
+name          = "JVM Arguments"
+env_variable  = "JVM_EXTRA"
+description   = "Argumentos adicionais para a JVM."
+default       = ""
+user_viewable = true
+user_editable = true
+rules         = "nullable|string"
+field_type    = "text"
+
+[install]
+container  = "ghcr.io/ptero-eggs/installers:alpine"
+entrypoint = "ash"
+script     = """
+#!/bin/ash
+# script de instalação aqui
+"""
+
+[[config_files]]
+path   = "server.properties"
+parser = "properties"
+[config_files.patches]
+"server-ip"   = "0.0.0.0"
+"server-port" = "{{server.build.default.port}}"
+```
+
+`{{server.build.default.port}}` é uma **variável de contexto do servidor** (porta alocada pelo panel), distinta das `{{VAR}}` definidas pelo usuário.
+
+### Schema PostgreSQL
+
+```sql
+CREATE TABLE eggs (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name          TEXT NOT NULL,
+    description   TEXT,
+    author        TEXT,
+    version       TEXT NOT NULL DEFAULT '1.0.0',
+    features      TEXT[]  NOT NULL DEFAULT '{}',      -- ["eula", "java_version"]
+    file_denylist TEXT[]  NOT NULL DEFAULT '{}',
+    docker_images JSONB   NOT NULL DEFAULT '{}',      -- {"Java 21": "ghcr.io/..."}
+    start_cmd     TEXT NOT NULL,
+    stop_cmd      TEXT NOT NULL DEFAULT 'stop',
+    startup_done  TEXT,                               -- string nos logs = servidor pronto
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE egg_variables (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    egg_id        UUID NOT NULL REFERENCES eggs(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,            -- label: "Minecraft Version"
+    description   TEXT,
+    env_variable  TEXT NOT NULL,            -- nome real: "MINECRAFT_VERSION"
+    default_val   TEXT,
+    user_viewable BOOLEAN NOT NULL DEFAULT TRUE,
+    user_editable BOOLEAN NOT NULL DEFAULT TRUE,
+    rules         TEXT,                     -- "required|string|max:20"
+    field_type    TEXT NOT NULL DEFAULT 'text'
+);
+
+CREATE TABLE egg_install_scripts (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    egg_id     UUID NOT NULL REFERENCES eggs(id) ON DELETE CASCADE,
+    container  TEXT NOT NULL,              -- imagem do instalador
+    entrypoint TEXT NOT NULL DEFAULT 'bash',
+    script     TEXT NOT NULL
+);
+
+CREATE TABLE egg_config_files (
+    id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    egg_id  UUID NOT NULL REFERENCES eggs(id) ON DELETE CASCADE,
+    path    TEXT NOT NULL,                -- caminho relativo dentro do container
+    parser  TEXT NOT NULL CHECK (parser IN ('properties','json','yaml','ini','xml')),
+    patches JSONB NOT NULL                -- {"chave": "valor_ou_{{VAR}}"}
+);
+```
+
+### Validação de `rules`
+
+Subconjunto implementado em Rust (suficiente para cobrir todos os eggs oficiais):
+
+| Rule | Comportamento |
+|---|---|
+| `required` | campo não pode ser vazio |
+| `nullable` | campo pode ser null/vazio |
+| `string` | valor é string |
+| `integer` | valor é inteiro |
+| `boolean` | valor é true/false |
+| `max:N` | comprimento máximo N |
+| `min:N` | comprimento mínimo N |
+| `regex:/pattern/` | valor deve casar com regex |
+
+### Importador de eggs Pterodactyl
+
+`POST /api/eggs/import` aceita o JSON do formato `PTDL_v2` e converte automaticamente:
+
+| Campo Pterodactyl | Campo Oxydactylus |
+|---|---|
+| `name` | `eggs.name` |
+| `author` | `eggs.author` |
+| `description` | `eggs.description` |
+| `features` | `eggs.features` |
+| `file_denylist` | `eggs.file_denylist` |
+| `docker_images` | `eggs.docker_images` (JSONB) |
+| `startup` | `eggs.start_cmd` |
+| `config.stop` | `eggs.stop_cmd` |
+| `config.startup.done` | `eggs.startup_done` |
+| `config.files` (JSON string) | `egg_config_files` (parser + patches) |
+| `variables[].name` | `egg_variables.name` |
+| `variables[].env_variable` | `egg_variables.env_variable` |
+| `variables[].default_value` | `egg_variables.default_val` |
+| `variables[].rules` | `egg_variables.rules` |
+| `variables[].user_viewable` | `egg_variables.user_viewable` |
+| `variables[].user_editable` | `egg_variables.user_editable` |
+| `scripts.installation.script` | `egg_install_scripts.script` |
+| `scripts.installation.container` | `egg_install_scripts.container` |
+| `scripts.installation.entrypoint` | `egg_install_scripts.entrypoint` |
+
+### Export como `.toml`
+
+`GET /api/eggs/:id/export` serializa o egg do banco para o formato `.toml` nativo — pronto para versionar em git ou compartilhar entre instâncias.
+
+### Substituição de variáveis em runtime
+
+Antes de criar o container, o panel resolve todas as `{{VAR}}` combinando:
+
+1. Valores definidos pelo usuário para o servidor
+2. Defaults do egg para variáveis não preenchidas
+3. Variáveis de contexto do servidor (`{{server.build.default.port}}` etc.)
+
+O container recebe apenas variáveis resolvidas como `env` — nunca strings com `{{}}` literais.
+
+O node aplica os `patches` de `egg_config_files` após a instalação, usando o `parser` correto para cada arquivo (properties, json, yaml, etc.) antes de iniciar o servidor.
 
 ---
 
