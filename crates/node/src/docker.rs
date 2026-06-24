@@ -106,8 +106,26 @@ impl DockerBackend for BollardDocker {
             .map_err(NodeError::from)
     }
 
-    async fn send_command(&self, _id: String, _command: String) -> Result<()> {
-        unimplemented!("implemented in Task 3")
+    async fn send_command(&self, id: String, command: String) -> Result<()> {
+        use bollard::container::AttachContainerOptions;
+        use tokio::io::AsyncWriteExt;
+
+        let mut attach = self.inner
+            .attach_container(&id, Some(AttachContainerOptions::<String> {
+                stdin:  Some(true),
+                stream: Some(true),
+                stdout: Some(false),
+                stderr: Some(false),
+                ..Default::default()
+            }))
+            .await
+            .map_err(NodeError::from)?;
+
+        let payload = format!("{}\n", command);
+        attach.input
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| NodeError::Docker(e.to_string()))
     }
 
     async fn get_stats(&self, _id: String) -> Result<ContainerStats> {
@@ -183,5 +201,16 @@ mod tests {
             .returning(|_| async { Ok(()) }.boxed());
 
         mock.delete_container("abc123".into()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mock_send_command_receives_command_with_newline() {
+        let mut mock = MockDockerBackend::new();
+        mock.expect_send_command()
+            .withf(|id, cmd| id == "srv-1" && cmd == "say hello\n")
+            .once()
+            .returning(|_, _| async { Ok(()) }.boxed());
+
+        mock.send_command("srv-1".into(), "say hello\n".into()).await.unwrap();
     }
 }
