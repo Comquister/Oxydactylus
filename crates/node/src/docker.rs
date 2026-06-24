@@ -125,6 +125,10 @@ impl DockerBackend for BollardDocker {
         attach.input
             .write_all(payload.as_bytes())
             .await
+            .map_err(|e| NodeError::Docker(e.to_string()))?;
+        attach.input
+            .flush()
+            .await
             .map_err(|e| NodeError::Docker(e.to_string()))
     }
 
@@ -207,10 +211,10 @@ mod tests {
     async fn mock_send_command_receives_command_with_newline() {
         let mut mock = MockDockerBackend::new();
         mock.expect_send_command()
-            .withf(|id, cmd| id == "srv-1" && cmd == "say hello\n")
+            .withf(|id, cmd| id == "srv-1" && cmd == "say hello")
             .once()
             .returning(|_, _| async { Ok(()) }.boxed());
 
-        mock.send_command("srv-1".into(), "say hello\n".into()).await.unwrap();
+        mock.send_command("srv-1".into(), "say hello".into()).await.unwrap();
     }
 }
