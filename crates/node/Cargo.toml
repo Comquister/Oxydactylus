@@ -4,8 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-oxy-core  = { path = "../core" }
-tokio     = { workspace = true }
-tonic     = { workspace = true }
-tracing   = { workspace = true }
-thiserror = { workspace = true }
+oxy-core     = { path = "../core" }
+tokio        = { workspace = true }
+tonic        = { workspace = true }
+tracing      = { workspace = true }
+thiserror    = { workspace = true }
+async-trait  = { workspace = true }
+futures-util = { workspace = true }
+tokio-stream = { workspace = true }
+bollard      = "0.17"
+
+[dev-dependencies]
+mockall    = "0.13"
+tokio-test = "0.4"

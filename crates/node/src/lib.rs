@@ -1,6 +1,12 @@
-use oxy_core::{NodeConfig, Result};
+pub mod docker;
+pub mod error;
+pub mod interceptor;
+pub mod server;
+pub mod stream;
 
-pub async fn run(config: NodeConfig) -> Result<()> {
+use oxy_core::NodeConfig;
+
+pub async fn run(config: NodeConfig) -> oxy_core::Result<()> {
     tracing::info!(listen = %config.grpc_listen, "node starting");
     std::future::pending::<()>().await;
     Ok(())
