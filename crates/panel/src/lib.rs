@@ -1,4 +1,5 @@
 mod db;
+pub mod auth;
 pub mod error;
 
 pub use error::{PanelError, Result};
@@ -13,7 +14,9 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> axum::Router {
-    axum::Router::new().with_state(state)
+    axum::Router::new()
+        .nest("/auth", auth::auth_router())
+        .with_state(state)
 }
 
 pub async fn run(config: PanelConfig) -> oxy_core::Result<()> {
