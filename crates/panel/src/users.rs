@@ -19,7 +19,6 @@ pub struct User {
     pub id:              Uuid,
     pub email:          String,
     #[serde(skip)]
-    #[allow(dead_code)]
     pub password_hash:  String,
     pub is_admin:       bool,
     pub created_at:     DateTime<Utc>,
