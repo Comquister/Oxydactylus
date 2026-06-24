@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package oxydactylus.node;
+
+service NodeService {
+    rpc StartServer  (ServerStartRequest)   returns (ServerReply);
+    rpc StopServer   (ServerStopRequest)    returns (ServerReply);
+    rpc DeleteServer (ServerDeleteRequest)  returns (ServerReply);
+    rpc GetStats     (ServerStatsRequest)   returns (ServerStats);
+    rpc StreamLogs   (ServerLogsRequest)    returns (stream LogLine);
+    rpc SendCommand  (ServerCommandRequest) returns (ServerReply);
+}
+
+message ServerStartRequest  { string server_id = 1; }
+message ServerDeleteRequest { string server_id = 1; }
+message ServerStatsRequest  { string server_id = 1; }
+
+message ServerStopRequest {
+    string server_id = 1;
+    uint32 timeout   = 2;
+}
+
+message ServerCommandRequest {
+    string server_id = 1;
+    string content   = 2;
+}
+
+message ServerLogsRequest {
+    string server_id = 1;
+    bool   follow    = 2;
+}
+
+message ServerReply {
+    bool   success = 1;
+    string message = 2;
+}
+
+message ServerStats {
+    string server_id    = 1;
+    uint64 memory_bytes = 2;
+    double cpu_percent  = 3;
+    uint64 rx_bytes     = 4;
+    uint64 tx_bytes     = 5;
+}
+
+message LogLine {
+    string content   = 1;
+    string stream    = 2;
+    int64  timestamp = 3;
+}
