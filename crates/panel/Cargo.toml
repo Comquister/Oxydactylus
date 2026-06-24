@@ -1,0 +1,9 @@
+[package]
+name    = "oxy-panel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oxy-core = { path = "../core" }
+tokio    = { workspace = true }
+tracing  = { workspace = true }
