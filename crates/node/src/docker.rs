@@ -132,8 +132,44 @@ impl DockerBackend for BollardDocker {
             .map_err(|e| NodeError::Docker(e.to_string()))
     }
 
-    async fn get_stats(&self, _id: String) -> Result<ContainerStats> {
-        unimplemented!("implemented in Task 5")
+    async fn get_stats(&self, id: String) -> Result<ContainerStats> {
+        use bollard::container::StatsOptions;
+        use futures_util::StreamExt;
+
+        let mut stream = self.inner.stats(&id, Some(StatsOptions {
+            stream:   false,
+            one_shot: true,
+        }));
+
+        let stats = stream
+            .next()
+            .await
+            .ok_or_else(|| NodeError::Docker("no stats returned".into()))??;
+
+        let cpu_delta = stats.cpu_stats.cpu_usage.total_usage
+            .saturating_sub(stats.precpu_stats.cpu_usage.total_usage);
+        let system_delta = stats.cpu_stats.system_cpu_usage.unwrap_or(0)
+            .saturating_sub(stats.precpu_stats.system_cpu_usage.unwrap_or(0));
+        let num_cpus = stats.cpu_stats.online_cpus.unwrap_or(1) as f64;
+        let cpu_percent = if system_delta > 0 {
+            (cpu_delta as f64 / system_delta as f64) * num_cpus * 100.0
+        } else {
+            0.0
+        };
+
+        let memory_bytes = stats.memory_stats.usage.unwrap_or(0);
+
+        let (rx_bytes, tx_bytes) = stats
+            .networks
+            .as_ref()
+            .map(|nets| {
+                nets.values().fold((0u64, 0u64), |(rx, tx), net| {
+                    (rx + net.rx_bytes as u64, tx + net.tx_bytes as u64)
+                })
+            })
+            .unwrap_or((0, 0));
+
+        Ok(ContainerStats { memory_bytes, cpu_percent, rx_bytes, tx_bytes })
     }
 
     async fn log_stream(&self, id: String, follow: bool)
@@ -243,5 +279,29 @@ mod tests {
             .returning(|_, _| async { Ok(()) }.boxed());
 
         mock.send_command("srv-1".into(), "say hello".into()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mock_get_stats_returns_container_stats() {
+        let mut mock = MockDockerBackend::new();
+        mock.expect_get_stats()
+            .withf(|id| id == "srv-1")
+            .once()
+            .returning(|_| {
+                async {
+                    Ok(ContainerStats {
+                        memory_bytes: 256 * 1024 * 1024,
+                        cpu_percent:  12.5,
+                        rx_bytes:     1024,
+                        tx_bytes:     2048,
+                    })
+                }.boxed()
+            });
+
+        let stats = mock.get_stats("srv-1".into()).await.unwrap();
+        assert_eq!(stats.memory_bytes, 256 * 1024 * 1024);
+        assert!((stats.cpu_percent - 12.5).abs() < 0.001);
+        assert_eq!(stats.rx_bytes, 1024);
+        assert_eq!(stats.tx_bytes, 2048);
     }
 }
