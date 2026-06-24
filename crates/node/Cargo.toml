@@ -11,7 +11,7 @@ tracing      = { workspace = true }
 thiserror    = { workspace = true }
 async-trait  = { workspace = true }
 futures-util = { workspace = true }
-tokio-stream = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
 bollard      = "0.17"
 
 [dev-dependencies]
