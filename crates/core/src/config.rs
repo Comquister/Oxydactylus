@@ -18,6 +18,7 @@ pub struct RoleSection {
 pub struct PanelConfig {
     pub http_listen:  String,
     pub database_url: String,
+    pub jwt_secret:   String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,6 +47,7 @@ type = "panel"
 [panel]
 http_listen  = "0.0.0.0:3000"
 database_url = "postgres://localhost/oxy"
+jwt_secret   = "test-jwt-secret"
 "#;
         let cfg: Config = toml::from_str(raw).unwrap();
         assert_eq!(cfg.role.kind, Role::Panel);
@@ -82,6 +84,7 @@ type = "both"
 [panel]
 http_listen  = "0.0.0.0:3000"
 database_url = "postgres://localhost/oxy"
+jwt_secret   = "test-jwt-secret"
 
 [node]
 grpc_listen = "0.0.0.0:8080"

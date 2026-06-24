@@ -4,6 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-oxy-core = { path = "../core" }
-tokio    = { workspace = true }
-tracing  = { workspace = true }
+oxy-core     = { path = "../core" }
+tokio        = { workspace = true }
+tonic        = { workspace = true }
+tracing      = { workspace = true }
+thiserror    = { workspace = true }
+serde        = { workspace = true }
+uuid         = { workspace = true }
+axum         = { workspace = true }
+sqlx         = { workspace = true }
+jsonwebtoken = { workspace = true }
+argon2       = { workspace = true }
+chrono       = { workspace = true }
+serde_json   = { workspace = true }
+
+[dev-dependencies]
+tower          = { workspace = true }
+http-body-util = "0.1"

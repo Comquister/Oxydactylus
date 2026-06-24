@@ -16,6 +16,13 @@ uuid               = { version = "1",   features = ["v4", "serde"] }
 async-trait        = "0.1"
 futures-util       = "0.3"
 tokio-stream       = "0.1"
+axum               = { version = "0.7", features = ["macros"] }
+sqlx               = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono", "migrate"] }
+jsonwebtoken       = "9"
+argon2             = { version = "0.5", features = ["std"] }
+chrono             = { version = "0.4", features = ["serde"] }
+serde_json         = "1"
+tower              = { version = "0.4", features = ["util"] }
 
 [profile.release]
 opt-level     = 3
