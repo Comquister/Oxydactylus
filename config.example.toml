@@ -1,5 +1,40 @@
 # config.example.toml
 # Copy to config.toml and edit before running.
+#
+# Choose one of the three role configurations below based on your deployment type:
+# - Panel-only: runs the control panel and web UI
+# - Node-only: runs the compute node
+# - Both: runs both panel and node (common for development)
+
+# ============================================================================
+# Panel-only deployment
+# ============================================================================
+# Uncomment and use this configuration if you only need the control panel.
+#
+# [role]
+# type = "panel"
+#
+# [panel]
+# http_listen  = "0.0.0.0:3000"
+# database_url = "postgres://oxy:oxy@localhost/oxy"
+
+# ============================================================================
+# Node-only deployment
+# ============================================================================
+# Uncomment and use this configuration if you only need a compute node.
+#
+# [role]
+# type = "node"
+#
+# [node]
+# grpc_listen = "0.0.0.0:8080"
+# token       = "change-me-to-a-random-secret"
+
+# ============================================================================
+# Both deployment (default for development)
+# ============================================================================
+# Use this configuration to run both panel and node. This is the recommended
+# setup for development and single-machine deployments.
 
 [role]
 type = "both"
