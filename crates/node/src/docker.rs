@@ -46,3 +46,142 @@ impl BollardDocker {
         Ok(Self { inner })
     }
 }
+
+#[async_trait]
+impl DockerBackend for BollardDocker {
+    async fn create_container(&self, spec: ContainerSpec) -> Result<String> {
+        use bollard::container::{Config, CreateContainerOptions};
+        use bollard::models::HostConfig;
+
+        if spec.memory_mb <= 0 || spec.cpu_percent <= 0 {
+            return Err(NodeError::Validation(
+                "memory_mb and cpu_percent must be positive".into(),
+            ));
+        }
+
+        let opts = CreateContainerOptions {
+            name:     spec.name.as_str(),
+            platform: None,
+        };
+        let cfg = Config {
+            image:       Some(spec.image.as_str()),
+            env:         Some(spec.env.iter().map(String::as_str).collect()),
+            open_stdin:  Some(true),
+            stdin_once:  Some(false),
+            host_config: Some(HostConfig {
+                memory:    Some(spec.memory_mb * 1024 * 1024),
+                nano_cpus: Some(spec.cpu_percent * 10_000_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resp = self.inner.create_container(Some(opts), cfg).await?;
+        Ok(resp.id)
+    }
+
+    async fn start_container(&self, id: String) -> Result<()> {
+        self.inner
+            .start_container::<String>(&id, None)
+            .await
+            .map_err(NodeError::from)
+    }
+
+    async fn stop_container(&self, id: String, timeout: u32) -> Result<()> {
+        use bollard::container::StopContainerOptions;
+        self.inner
+            .stop_container(&id, Some(StopContainerOptions { t: timeout as i64 }))
+            .await
+            .map_err(NodeError::from)
+    }
+
+    async fn delete_container(&self, id: String) -> Result<()> {
+        use bollard::container::RemoveContainerOptions;
+        self.inner
+            .remove_container(&id, Some(RemoveContainerOptions {
+                v:     true,
+                force: false,
+                link:  false,
+            }))
+            .await
+            .map_err(NodeError::from)
+    }
+
+    async fn send_command(&self, _id: String, _command: String) -> Result<()> {
+        unimplemented!("implemented in Task 3")
+    }
+
+    async fn get_stats(&self, _id: String) -> Result<ContainerStats> {
+        unimplemented!("implemented in Task 5")
+    }
+
+    async fn log_stream(&self, _id: String, _follow: bool)
+        -> Result<BoxStream<'static, Result<LogChunk>>>
+    {
+        unimplemented!("implemented in Task 4")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::future::FutureExt;
+
+    #[tokio::test]
+    async fn mock_create_container_returns_id() {
+        let mut mock = MockDockerBackend::new();
+        mock.expect_create_container()
+            .once()
+            .returning(|spec| {
+                async move {
+                    assert_eq!(spec.image, "nginx:latest");
+                    assert_eq!(spec.name, "srv-1");
+                    assert_eq!(spec.memory_mb, 512);
+                    assert_eq!(spec.cpu_percent, 50);
+                    Ok("abc123".to_string())
+                }.boxed()
+            });
+
+        let id = mock.create_container(ContainerSpec {
+            image:       "nginx:latest".into(),
+            name:        "srv-1".into(),
+            env:         vec!["PORT=25565".into()],
+            memory_mb:   512,
+            cpu_percent: 50,
+        }).await.unwrap();
+
+        assert_eq!(id, "abc123");
+    }
+
+    #[tokio::test]
+    async fn mock_start_container_called_with_id() {
+        let mut mock = MockDockerBackend::new();
+        mock.expect_start_container()
+            .withf(|id| id == "abc123")
+            .once()
+            .returning(|_| async { Ok(()) }.boxed());
+
+        mock.start_container("abc123".into()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mock_stop_container_passes_timeout() {
+        let mut mock = MockDockerBackend::new();
+        mock.expect_stop_container()
+            .withf(|id, timeout| id == "abc123" && *timeout == 10)
+            .once()
+            .returning(|_, _| async { Ok(()) }.boxed());
+
+        mock.stop_container("abc123".into(), 10).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mock_delete_container_called_with_id() {
+        let mut mock = MockDockerBackend::new();
+        mock.expect_delete_container()
+            .withf(|id| id == "abc123")
+            .once()
+            .returning(|_| async { Ok(()) }.boxed());
+
+        mock.delete_container("abc123".into()).await.unwrap();
+    }
+}
