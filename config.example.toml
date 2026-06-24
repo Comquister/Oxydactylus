@@ -1,0 +1,13 @@
+# config.example.toml
+# Copy to config.toml and edit before running.
+
+[role]
+type = "both"
+
+[panel]
+http_listen  = "0.0.0.0:3000"
+database_url = "postgres://oxy:oxy@localhost/oxy"
+
+[node]
+grpc_listen = "0.0.0.0:8080"
+token       = "change-me-to-a-random-secret"
