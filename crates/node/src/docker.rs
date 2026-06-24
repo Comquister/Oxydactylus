@@ -136,10 +136,37 @@ impl DockerBackend for BollardDocker {
         unimplemented!("implemented in Task 5")
     }
 
-    async fn log_stream(&self, _id: String, _follow: bool)
+    async fn log_stream(&self, id: String, follow: bool)
         -> Result<BoxStream<'static, Result<LogChunk>>>
     {
-        unimplemented!("implemented in Task 4")
+        use bollard::container::{LogOutput, LogsOptions};
+        use futures_util::StreamExt;
+
+        let opts = LogsOptions::<String> {
+            stdout: true,
+            stderr: true,
+            follow,
+            ..Default::default()
+        };
+
+        let stream = self.inner
+            .logs(&id, Some(opts))
+            .map(|result| {
+                result.map_err(NodeError::from).map(|output| {
+                    let stream_name = match &output {
+                        LogOutput::StdOut { .. } => "stdout",
+                        LogOutput::StdErr { .. } => "stderr",
+                        _                        => "stdout",
+                    }
+                    .to_string();
+                    LogChunk {
+                        content: output.to_string(),
+                        stream:  stream_name,
+                    }
+                })
+            });
+
+        Ok(Box::pin(stream))
     }
 }
 
