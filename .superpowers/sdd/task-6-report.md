@@ -1,88 +1,53 @@
-# Task 6 Report — CLI Entrypoint + Integration Smoke Tests
+# Task 6 Report: NodeClient gRPC Wrapper
 
-## Summary
+## Status: DONE
 
-Created the `oxydactylus` CLI binary (`crates/cli/`) and `config.example.toml`.
+## Commits
+- `8f10994` feat(oxy-panel): NodeClient gRPC wrapper with bearer token interceptor
 
-### Files Created / Modified
+## What Was Created/Modified
 
-- `crates/cli/Cargo.toml` — added `[[bin]]` section and all required dependencies (clap pinned at `"4"`, workspace deps for tokio/anyhow/tracing/tracing-subscriber/toml, path deps for oxy-core/oxy-node/oxy-panel)
-- `crates/cli/src/main.rs` — full implementation with clap `Parser` struct, config reading, role dispatch with `tokio::join!` for `Role::Both`
-- `config.example.toml` — example config at workspace root covering all three roles
+### Created: `crates/panel/src/node_client.rs`
+- `BearerInterceptor` — local `tonic::service::Interceptor` that injects `Authorization: Bearer <token>` into every outgoing request's gRPC metadata
+- `NodeClient` — wraps `NodeServiceClient<InterceptedService<Channel, BearerInterceptor>>`
+- `NodeClient::connect(grpc_addr: &str, token: &str) -> Result<NodeClient>` — creates a connected channel via `Channel::from_shared().connect().await`, wraps it with the interceptor
+- Methods (all `&mut self`): `provision`, `start`, `stop`, `delete`, `send_command`, `get_stats` — all return `Result<()>` or `Result<ServerStats>`; tonic errors are converted to `PanelError::Node` via the existing `From<tonic::Status>` impl
+- 3 integration tests using an in-process `EchoNode` mock server with `oxy_node::interceptor::AuthInterceptor` for server-side auth validation
 
-### Build
+### Modified: `crates/panel/src/lib.rs`
+- Added `pub mod node_client;`
 
-```
-cargo build
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 53.69s
-```
+### Modified: `crates/panel/Cargo.toml`
+- Added `[dev-dependencies]`:
+  - `oxy-node = { path = "../node" }` — for `AuthInterceptor` in test server
+  - `tokio-stream = { workspace = true, features = ["net"] }` — for `TcpListenerStream`
 
-Binary at `target/debug/oxydactylus`.
-
----
-
-## Smoke Test Results
-
-### Step 5: `--help` shows usage with `-c`/`--config` option
-
-```
-$ ./target/debug/oxydactylus --help
-Game server management panel
-
-Usage: oxydactylus [OPTIONS]
-
-Options:
-  -c, --config <CONFIG>  [default: config.toml]
-  -h, --help             Print help
-  -V, --version          Print version
-```
-
-**PASS** ✓
-
----
-
-### Step 6: Missing config gives clear error
+## Test Command and Output
 
 ```
-$ ./target/debug/oxydactylus --config /nonexistent 2>&1
-Error: cannot read "/nonexistent": No such file or directory (os error 2)
+$ cargo test -p oxy-panel node_client 2>&1
+
+running 3 tests
+test node_client::tests::client_gets_stats ... ok
+test node_client::tests::client_can_provision_and_start ... ok
+test node_client::tests::wrong_token_returns_node_error ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.06s
 ```
 
-**PASS** ✓
+Full suite `cargo test -p oxy-panel`: 14 tests pass, 8 pre-existing DB tests fail without `DATABASE_URL` (unchanged from prior tasks).
 
----
+## Self-Review Findings
 
-### Step 7: Missing `[panel]` section with `role=panel` gives clear error
+1. **`sqlx = { workspace = true, features = ["test"] }` doesn't exist** — the brief included `sqlx` with `features = ["test"]` in dev-dependencies, but SQLx 0.8 has no `test` feature (it uses `#[sqlx::test]` via the `sqlx-test` macro, not a feature flag). Removed that line; existing DB tests continue to work as before.
 
-```
-$ printf '[role]\ntype = "panel"\n' > /tmp/bad.toml
-$ ./target/debug/oxydactylus --config /tmp/bad.toml 2>&1
-Error: [panel] section required when role = "panel"
-```
+2. **`futures_util::future::FutureExt` import not needed** — the brief's test template imported it but it's unused. Omitted to avoid compiler warnings.
 
-**PASS** ✓
+3. **No `unwrap()`/`expect()` in non-test code** — verified; all error paths use `?` with `PanelError::Node`.
 
----
+4. **`BearerInterceptor` defined locally instead of importing from `oxy-node`** — the brief specifies a local definition (the node crate's `AuthInterceptor` is a server-side interceptor for validating incoming tokens; the panel-side interceptor attaches outgoing tokens). This is intentional and correct.
 
-### Step 8: `role=both` logs both "panel starting" and "node starting"
-
-```
-$ cp config.example.toml config.toml
-$ RUST_LOG=info timeout 2 ./target/debug/oxydactylus 2>&1 || true
-2026-06-24T17:13:47.524846Z  INFO oxy_panel: panel starting listen=0.0.0.0:3000
-2026-06-24T17:13:47.524886Z  INFO oxy_node: node starting listen=0.0.0.0:8080
-```
-
-Both services started concurrently via `tokio::join!` and ran until `timeout 2` killed the process.
-
-**PASS** ✓
-
----
-
-## Implementation Notes
-
-- `Role::Both` uses `tokio::join!` so both futures run concurrently; errors from each are propagated after both complete.
-- No `println!` anywhere — all output via `tracing`.
-- Default config path is `config.toml`; overridable with `-c` / `--config`.
-- `clap = { version = "4", features = ["derive"] }` pinned directly (not in workspace), per constraints.
-- `config.toml` remains in `.gitignore` (added by Task 1); only `config.example.toml` is tracked.
+## Fix: NodeClient::new(node)
+- Added `pub async fn new(node: &Node) -> Result<Self>` to NodeClient
+- Wraps `connect()` for convenient client creation from a `Node` struct
+- Tests: 3 tests passing (client_can_provision_and_start, client_gets_stats, wrong_token_returns_node_error)
