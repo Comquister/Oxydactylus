@@ -75,6 +75,8 @@ struct CreateServerRequest {
     egg_id:      Option<Uuid>,
     #[serde(default)]
     egg_vars:    std::collections::HashMap<String, String>,
+    #[serde(default)]
+    user_id:     Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +99,8 @@ async fn create_server(
         return Err(PanelError::Validation("name and image are required".to_string()));
     }
 
+    let owner_id = body.user_id.unwrap_or(admin.0.id);
+
     // resolve egg variables if an egg_id was given
     let mut env = body.env.clone();
     if let Some(eid) = body.egg_id {
@@ -109,7 +113,7 @@ async fn create_server(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'installing')
          RETURNING id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at",
     )
-    .bind(admin.0.id)
+    .bind(owner_id)
     .bind(body.node_id)
     .bind(&body.name)
     .bind(&body.image)
@@ -613,6 +617,70 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn create_server_assigns_user_id(pool: sqlx::PgPool) {
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (admin_id, token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        // criar segundo usuário para testar atribuição explícita
+        let owner_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        )
+        .bind("owner@test.com").bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .fetch_one(&pool).await.unwrap();
+
+        let app = router(make_state(pool));
+        let body = serde_json::json!({
+            "node_id":     node_id,
+            "user_id":     owner_id,
+            "name":        "owned-server",
+            "image":       "ubuntu",
+            "memory_mb":   512,
+            "cpu_percent": 50,
+        });
+        let req = Request::builder()
+            .method("POST").uri("/api/servers")
+            .header("authorization", format!("Bearer {}", token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let srv: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(srv["user_id"].as_str().unwrap(), owner_id.to_string());
+        // suppress unused variable warning
+        let _ = admin_id;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn create_server_defaults_user_id_to_admin(pool: sqlx::PgPool) {
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (admin_id, token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let app = router(make_state(pool));
+        let body = serde_json::json!({
+            "node_id":     node_id,
+            "name":        "admin-server",
+            "image":       "ubuntu",
+            "memory_mb":   512,
+            "cpu_percent": 50,
+        });
+        let req = Request::builder()
+            .method("POST").uri("/api/servers")
+            .header("authorization", format!("Bearer {}", token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let srv: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(srv["user_id"].as_str().unwrap(), admin_id.to_string());
     }
 
     #[sqlx::test(migrations = "./migrations")]
