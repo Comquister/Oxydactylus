@@ -3,6 +3,7 @@ pub mod auth;
 pub mod egg_vars;
 pub mod error;
 pub mod node_client;
+pub mod permissions;
 mod nodes;
 mod servers;
 mod users;
