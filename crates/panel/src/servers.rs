@@ -66,6 +66,10 @@ struct CreateServerRequest {
     cpu_percent: i32,
     #[serde(default)]
     env:         Vec<String>,
+    #[serde(default)]
+    egg_id:      Option<Uuid>,
+    #[serde(default)]
+    egg_vars:    std::collections::HashMap<String, String>,
 }
 
 async fn create_server(
@@ -82,9 +86,16 @@ async fn create_server(
         return Err(PanelError::Validation("name and image are required".to_string()));
     }
 
+    // resolve egg variables if an egg_id was given
+    let mut env = body.env.clone();
+    if let Some(eid) = body.egg_id {
+        let egg_env = crate::egg_vars::load_egg_env(&state.db, eid, body.egg_vars.clone()).await?;
+        env.extend(egg_env);
+    }
+
     let server = sqlx::query_as::<_, Server>(
-        "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent, env)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent, env, egg_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id, node_id, name, image, memory_mb, cpu_percent, env, created_at",
     )
     .bind(body.node_id)
@@ -92,7 +103,8 @@ async fn create_server(
     .bind(&body.image)
     .bind(body.memory_mb)
     .bind(body.cpu_percent)
-    .bind(&body.env)
+    .bind(&env)
+    .bind(body.egg_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -102,7 +114,7 @@ async fn create_server(
         &server.image,
         server.memory_mb as u32,
         server.cpu_percent as u32,
-        server.env.clone(),
+        env,
     )
     .await {
         // compensating delete — best effort; ignore failure
@@ -434,5 +446,50 @@ mod tests {
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["memory_bytes"], 1024);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn create_server_with_egg_resolves_vars(pool: sqlx::PgPool) {
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (_, token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        // create egg + variable
+        let egg_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO eggs (name, start_cmd, docker_images) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("Purpur").bind("java -jar server.jar").bind(serde_json::json!({}))
+        .fetch_one(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO egg_variables (egg_id, name, env_variable, default_val, field_type)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(egg_id).bind("Jar").bind("SERVER_JARFILE").bind("server.jar").bind("text")
+        .execute(&pool).await.unwrap();
+
+        let app = router(make_state(pool));
+        let body = serde_json::json!({
+            "node_id":     node_id,
+            "name":        "mc-egg-server",
+            "image":       "itzg/minecraft-server",
+            "memory_mb":   1024,
+            "cpu_percent": 100,
+            "egg_id":      egg_id,
+            "egg_vars":    {"SERVER_JARFILE": "purpur.jar"}
+        });
+        let req = Request::builder()
+            .method("POST").uri("/api/servers")
+            .header("authorization", format!("Bearer {}", token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let srv: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // env should contain the resolved var
+        let env_arr = srv["env"].as_array().unwrap();
+        assert!(env_arr.iter().any(|v| v.as_str() == Some("SERVER_JARFILE=purpur.jar")));
     }
 }

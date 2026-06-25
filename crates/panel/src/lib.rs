@@ -1,5 +1,6 @@
 mod db;
 pub mod auth;
+pub mod egg_vars;
 pub mod error;
 pub mod node_client;
 mod nodes;
