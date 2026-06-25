@@ -1,1 +1,0 @@
-ALTER TABLE servers ADD COLUMN status TEXT NOT NULL DEFAULT 'stopped';
