@@ -199,8 +199,22 @@ async fn start_server(
     .await?;
 
     let mut client = get_node_client(&state, server.node_id).await?;
-    client.start(&server.id.to_string()).await?;
-    Ok(StatusCode::NO_CONTENT)
+    match client.start(&server.id.to_string()).await {
+        Ok(_) => {
+            sqlx::query("UPDATE servers SET status = 'running' WHERE id = $1")
+                .bind(server.id)
+                .execute(&state.db)
+                .await?;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(e) => {
+            let _ = sqlx::query("UPDATE servers SET status = 'error' WHERE id = $1")
+                .bind(server.id)
+                .execute(&state.db)
+                .await;
+            Err(e)
+        }
+    }
 }
 
 async fn stop_server(
@@ -218,6 +232,10 @@ async fn stop_server(
 
     let mut client = get_node_client(&state, server.node_id).await?;
     client.stop(&server.id.to_string(), 10).await?;
+    sqlx::query("UPDATE servers SET status = 'stopped' WHERE id = $1")
+        .bind(server.id)
+        .execute(&state.db)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -492,6 +510,52 @@ mod tests {
         format!("http://127.0.0.1:{}", port)
     }
 
+    struct FailStartNode;
+
+    #[async_trait]
+    impl NodeService for FailStartNode {
+        type StreamLogsStream = ReceiverStream<std::result::Result<LogLine, Status>>;
+        async fn provision_server(&self, _: GrpcRequest<ServerProvisionRequest>)
+            -> std::result::Result<Response<ServerReply>, Status>
+        { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+        async fn start_server(&self, _: GrpcRequest<ServerStartRequest>)
+            -> std::result::Result<Response<ServerReply>, Status>
+        { Err(Status::internal("docker error")) }
+        async fn stop_server(&self, _: GrpcRequest<ServerStopRequest>)
+            -> std::result::Result<Response<ServerReply>, Status>
+        { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+        async fn delete_server(&self, _: GrpcRequest<ServerDeleteRequest>)
+            -> std::result::Result<Response<ServerReply>, Status>
+        { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+        async fn send_command(&self, _: GrpcRequest<ServerCommandRequest>)
+            -> std::result::Result<Response<ServerReply>, Status>
+        { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+        async fn get_stats(&self, _: GrpcRequest<ServerStatsRequest>)
+            -> std::result::Result<Response<ServerStats>, Status>
+        { Err(Status::internal("not implemented")) }
+        async fn stream_logs(&self, _: GrpcRequest<ServerLogsRequest>)
+            -> std::result::Result<Response<Self::StreamLogsStream>, Status>
+        { let (_, rx) = tokio::sync::mpsc::channel(1); Ok(Response::new(ReceiverStream::new(rx))) }
+    }
+
+    async fn start_fail_node(token: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let t = token.to_string();
+        tokio::spawn(async move {
+            use oxy_node::interceptor::AuthInterceptor;
+            tonic::transport::Server::builder()
+                .add_service(NodeServiceServer::with_interceptor(
+                    FailStartNode,
+                    AuthInterceptor::new(&t),
+                ))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        format!("http://127.0.0.1:{}", port)
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn stream_logs_returns_sse_events(pool: sqlx::PgPool) {
         let node_addr = start_log_node("node-token").await;
@@ -574,6 +638,94 @@ mod tests {
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         let srv: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(srv["status"], "stopped");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn start_server_sets_running_status(pool: sqlx::PgPool) {
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (_, token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+        let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5) RETURNING id",
+        )
+        .bind(node_id).bind("start-srv").bind("ubuntu").bind(512).bind(50)
+        .fetch_one(&pool).await.unwrap();
+
+        let app = router(make_state(pool.clone()));
+        let req = Request::builder()
+            .method("POST").uri(format!("/api/servers/{}/start", server_id))
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let status: String = sqlx::query_scalar("SELECT status FROM servers WHERE id = $1")
+            .bind(server_id)
+            .fetch_one(&pool)
+            .await.unwrap();
+        assert_eq!(status, "running");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn start_server_sets_error_on_node_failure(pool: sqlx::PgPool) {
+        let node_addr = start_fail_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (_, token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+        let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5) RETURNING id",
+        )
+        .bind(node_id).bind("fail-srv").bind("ubuntu").bind(512).bind(50)
+        .fetch_one(&pool).await.unwrap();
+
+        let app = router(make_state(pool.clone()));
+        let req = Request::builder()
+            .method("POST").uri(format!("/api/servers/{}/start", server_id))
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert!(res.status().is_server_error(), "expected 5xx, got {}", res.status());
+
+        let status: String = sqlx::query_scalar("SELECT status FROM servers WHERE id = $1")
+            .bind(server_id)
+            .fetch_one(&pool)
+            .await.unwrap();
+        assert_eq!(status, "error");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn stop_server_sets_stopped_status(pool: sqlx::PgPool) {
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (_, token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+        let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5) RETURNING id",
+        )
+        .bind(node_id).bind("stop-srv").bind("ubuntu").bind(512).bind(50)
+        .fetch_one(&pool).await.unwrap();
+
+        sqlx::query("UPDATE servers SET status = 'running' WHERE id = $1")
+            .bind(server_id)
+            .execute(&pool).await.unwrap();
+
+        let app = router(make_state(pool.clone()));
+        let req = Request::builder()
+            .method("POST").uri(format!("/api/servers/{}/stop", server_id))
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let status: String = sqlx::query_scalar("SELECT status FROM servers WHERE id = $1")
+            .bind(server_id)
+            .fetch_one(&pool)
+            .await.unwrap();
+        assert_eq!(status, "stopped");
     }
 
     #[sqlx::test(migrations = "./migrations")]
