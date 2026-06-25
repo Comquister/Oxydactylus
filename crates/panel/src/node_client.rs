@@ -1,8 +1,11 @@
 use oxy_core::proto::node::{
     node_service_client::NodeServiceClient,
-    ServerCommandRequest, ServerDeleteRequest, ServerProvisionRequest,
-    ServerStartRequest, ServerStats, ServerStatsRequest, ServerStopRequest,
+    LogLine, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest,
+    ServerProvisionRequest, ServerStartRequest, ServerStats, ServerStatsRequest,
+    ServerStopRequest,
 };
+use futures_util::{Stream, StreamExt};
+use std::pin::Pin;
 use tonic::{
     metadata::MetadataValue,
     service::interceptor::InterceptedService,
@@ -113,6 +116,23 @@ impl NodeClient {
             .map(|r| r.into_inner())
             .map_err(PanelError::from)
     }
+
+    pub async fn stream_logs(
+        &mut self,
+        server_id: &str,
+        follow: bool,
+    ) -> Result<Pin<Box<dyn Stream<Item = std::result::Result<LogLine, PanelError>> + Send>>> {
+        let streaming = self
+            .inner
+            .stream_logs(ServerLogsRequest {
+                server_id: server_id.to_string(),
+                follow,
+            })
+            .await
+            .map_err(PanelError::from)?
+            .into_inner();
+        Ok(Box::pin(streaming.map(|r| r.map_err(PanelError::from))))
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +240,90 @@ mod tests {
         let mut client = NodeClient::connect(&addr, "wrong-token").await.unwrap();
         let err = client.start("srv-1").await.unwrap_err();
         assert!(matches!(err, PanelError::Node(_)));
+    }
+
+    #[tokio::test]
+    async fn client_stream_logs_yields_lines() {
+        use futures_util::StreamExt;
+
+        struct LogNode;
+
+        #[async_trait]
+        impl NodeService for LogNode {
+            type StreamLogsStream = ReceiverStream<std::result::Result<LogLine, Status>>;
+
+            async fn provision_server(&self, _: Request<ServerProvisionRequest>)
+                -> std::result::Result<Response<ServerReply>, Status>
+            { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+
+            async fn start_server(&self, _: Request<ServerStartRequest>)
+                -> std::result::Result<Response<ServerReply>, Status>
+            { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+
+            async fn stop_server(&self, _: Request<ServerStopRequest>)
+                -> std::result::Result<Response<ServerReply>, Status>
+            { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+
+            async fn delete_server(&self, _: Request<ServerDeleteRequest>)
+                -> std::result::Result<Response<ServerReply>, Status>
+            { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+
+            async fn send_command(&self, _: Request<ServerCommandRequest>)
+                -> std::result::Result<Response<ServerReply>, Status>
+            { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+
+            async fn get_stats(&self, req: Request<ServerStatsRequest>)
+                -> std::result::Result<Response<ServerStats>, Status>
+            {
+                Ok(Response::new(ServerStats {
+                    server_id: req.into_inner().server_id,
+                    memory_bytes: 0, cpu_percent: 0.0, rx_bytes: 0, tx_bytes: 0,
+                }))
+            }
+
+            async fn stream_logs(&self, _: Request<ServerLogsRequest>)
+                -> std::result::Result<Response<Self::StreamLogsStream>, Status>
+            {
+                let (tx, rx) = tokio::sync::mpsc::channel(4);
+                tokio::spawn(async move {
+                    let _ = tx.send(Ok(LogLine {
+                        content: "hello\n".into(), stream: "stdout".into(), timestamp: 0,
+                    })).await;
+                    let _ = tx.send(Ok(LogLine {
+                        content: "world\n".into(), stream: "stdout".into(), timestamp: 0,
+                    })).await;
+                });
+                Ok(Response::new(ReceiverStream::new(rx)))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = "log-token";
+        let t = token.to_string();
+        tokio::spawn(async move {
+            use oxy_node::interceptor::AuthInterceptor;
+            use oxy_core::proto::node::node_service_server::NodeServiceServer;
+            use tokio_stream::wrappers::TcpListenerStream;
+            tonic::transport::Server::builder()
+                .add_service(NodeServiceServer::with_interceptor(
+                    LogNode,
+                    AuthInterceptor::new(&t),
+                ))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let addr = format!("http://127.0.0.1:{}", port);
+        let mut client = NodeClient::connect(&addr, token).await.unwrap();
+        let mut stream = client.stream_logs("srv-1", false).await.unwrap();
+
+        let line1 = stream.next().await.unwrap().unwrap();
+        assert_eq!(line1.content, "hello\n");
+        let line2 = stream.next().await.unwrap().unwrap();
+        assert_eq!(line2.content, "world\n");
+        assert!(stream.next().await.is_none());
     }
 }
