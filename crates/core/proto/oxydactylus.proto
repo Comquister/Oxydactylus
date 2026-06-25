@@ -3,12 +3,13 @@ syntax = "proto3";
 package oxydactylus.node;
 
 service NodeService {
-    rpc StartServer  (ServerStartRequest)   returns (ServerReply);
-    rpc StopServer   (ServerStopRequest)    returns (ServerReply);
-    rpc DeleteServer (ServerDeleteRequest)  returns (ServerReply);
-    rpc GetStats     (ServerStatsRequest)   returns (ServerStats);
-    rpc StreamLogs   (ServerLogsRequest)    returns (stream LogLine);
-    rpc SendCommand  (ServerCommandRequest) returns (ServerReply);
+    rpc StartServer      (ServerStartRequest)     returns (ServerReply);
+    rpc StopServer       (ServerStopRequest)      returns (ServerReply);
+    rpc DeleteServer     (ServerDeleteRequest)    returns (ServerReply);
+    rpc GetStats         (ServerStatsRequest)     returns (ServerStats);
+    rpc StreamLogs       (ServerLogsRequest)      returns (stream LogLine);
+    rpc SendCommand      (ServerCommandRequest)   returns (ServerReply);
+    rpc ProvisionServer  (ServerProvisionRequest) returns (ServerReply);
 }
 
 message ServerStartRequest  { string server_id = 1; }
@@ -47,4 +48,12 @@ message LogLine {
     string content   = 1;
     string stream    = 2;
     int64  timestamp = 3;
+}
+
+message ServerProvisionRequest {
+    string          server_id   = 1;
+    string          image       = 2;
+    uint32          memory_mb   = 3;
+    uint32          cpu_percent = 4;
+    repeated string env         = 5;
 }

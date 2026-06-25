@@ -6,8 +6,8 @@ use tonic::{Request, Response, Status};
 use oxy_core::proto::node::{
     node_service_server::NodeService,
     LogLine, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest,
-    ServerReply, ServerStartRequest, ServerStats, ServerStatsRequest,
-    ServerStopRequest,
+    ServerProvisionRequest, ServerReply, ServerStartRequest, ServerStats,
+    ServerStatsRequest, ServerStopRequest,
 };
 use crate::docker::DockerBackend;
 use crate::stream::forward_logs;
@@ -111,6 +111,25 @@ impl<B: DockerBackend> NodeService for NodeServiceImpl<B> {
             .await
             .map_err(Status::from)?;
         Ok(Self::ok(format!("command sent to {}", r.server_id)))
+    }
+
+    async fn provision_server(
+        &self,
+        req: Request<ServerProvisionRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        use crate::docker::ContainerSpec;
+        self.docker
+            .create_container(ContainerSpec {
+                name:        r.server_id.clone(),
+                image:       r.image,
+                memory_mb:   r.memory_mb as i64,
+                cpu_percent: r.cpu_percent as i64,
+                env:         r.env,
+            })
+            .await
+            .map_err(Status::from)?;
+        Ok(Self::ok(format!("provisioned {}", r.server_id)))
     }
 }
 
@@ -260,5 +279,38 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn provision_server_creates_container() {
+        let mut mock = MockDockerBackend::new();
+        mock.expect_create_container()
+            .once()
+            .returning(|spec| {
+                async move {
+                    assert_eq!(spec.name, "srv-new");
+                    assert_eq!(spec.image, "itzg/minecraft-server");
+                    assert_eq!(spec.memory_mb, 1024);
+                    assert_eq!(spec.cpu_percent, 100);
+                    assert_eq!(spec.env, vec!["EULA=TRUE"]);
+                    Ok("container-id-xyz".to_string())
+                }.boxed()
+            });
+
+        let reply = svc(mock)
+            .provision_server(Request::new(
+                oxy_core::proto::node::ServerProvisionRequest {
+                    server_id:   "srv-new".into(),
+                    image:       "itzg/minecraft-server".into(),
+                    memory_mb:   1024,
+                    cpu_percent: 100,
+                    env:         vec!["EULA=TRUE".into()],
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(reply.success);
     }
 }
