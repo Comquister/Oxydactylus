@@ -1,6 +1,7 @@
 mod db;
 pub mod auth;
 pub mod error;
+mod nodes;
 mod users;
 
 pub use error::{PanelError, Result};
@@ -18,6 +19,7 @@ pub fn router(state: AppState) -> axum::Router {
     axum::Router::new()
         .nest("/auth",      auth::auth_router())
         .nest("/api/users", users::users_router())
+        .nest("/api/nodes", nodes::nodes_router())
         .with_state(state)
 }
 
