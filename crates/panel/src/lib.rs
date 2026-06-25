@@ -1,6 +1,7 @@
 mod db;
 pub mod auth;
 pub mod error;
+pub mod node_client;
 mod nodes;
 mod users;
 

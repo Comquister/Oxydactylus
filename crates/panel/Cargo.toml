@@ -21,3 +21,5 @@ serde_json   = { workspace = true }
 [dev-dependencies]
 tower          = { workspace = true }
 http-body-util = "0.1"
+oxy-node       = { path = "../node" }
+tokio-stream   = { workspace = true, features = ["net"] }
