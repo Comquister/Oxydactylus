@@ -97,14 +97,21 @@ async fn create_server(
     .await?;
 
     let mut client = get_node_client(&state, server.node_id).await?;
-    client.provision(
+    if let Err(e) = client.provision(
         &server.id.to_string(),
         &server.image,
         server.memory_mb as u32,
         server.cpu_percent as u32,
         server.env.clone(),
     )
-    .await?;
+    .await {
+        // compensating delete — best effort; ignore failure
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1")
+            .bind(server.id)
+            .execute(&state.db)
+            .await;
+        return Err(e);
+    }
 
     Ok((StatusCode::CREATED, Json(server)))
 }
