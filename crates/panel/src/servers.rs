@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::sse::{Event, Sse},
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use futures_util::StreamExt;
@@ -306,7 +306,7 @@ async fn stream_server_logs(
         let event = match result {
             Ok(line) => Event::default()
                 .event(line.stream)
-                .data(line.content.trim_end_matches('\n')),
+                .data(line.content.trim_end_matches(['\r', '\n'])),
             Err(e) => Event::default().event("error").data(e.to_string()),
         };
         Ok::<Event, Infallible>(event)
