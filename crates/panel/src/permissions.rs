@@ -1,3 +1,5 @@
+//! Permission constants for the Oxydactylus panel subuser system.
+
 // Control
 pub const CONTROL_CONSOLE: &str = "control.console";
 pub const CONTROL_START:   &str = "control.start";
@@ -61,6 +63,7 @@ pub const SETTINGS_CHANGE_EGG: &str = "settings.change-egg";
 // Activity
 pub const ACTIVITY_READ: &str = "activity.read";
 
+/// INVARIANT: every public const in this module must appear exactly once in this slice.
 pub const ALL_PERMISSIONS: &[(&str, &[&str])] = &[
     ("control",  &[CONTROL_CONSOLE, CONTROL_START, CONTROL_STOP, CONTROL_RESTART]),
     ("user",     &[USER_CREATE, USER_READ, USER_UPDATE, USER_DELETE]),
