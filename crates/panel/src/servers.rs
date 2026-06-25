@@ -85,7 +85,7 @@ struct LogsQuery {
 
 async fn create_server(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    admin: AdminUser,
     Json(body): Json<CreateServerRequest>,
 ) -> Result<(StatusCode, Json<Server>)> {
     if body.memory_mb <= 0 || body.cpu_percent <= 0 {
@@ -109,7 +109,7 @@ async fn create_server(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'installing')
          RETURNING id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at",
     )
-    .bind(_admin.0.id)
+    .bind(admin.0.id)
     .bind(body.node_id)
     .bind(&body.name)
     .bind(&body.image)
