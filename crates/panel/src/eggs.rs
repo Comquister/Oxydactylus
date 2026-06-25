@@ -552,11 +552,12 @@ async fn export_egg_toml(
     let toml_str = build_egg_toml(&egg, &vars, install.as_ref(), &cfs)
         .map_err(|e| PanelError::Internal(e.to_string()))?;
 
-    Ok(axum::http::Response::builder()
+    let response = axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/toml; charset=utf-8")
         .body(axum::body::Body::from(toml_str))
-        .unwrap())
+        .map_err(|e| PanelError::Internal(e.to_string()))?;
+    Ok(response)
 }
 
 fn build_egg_toml(
