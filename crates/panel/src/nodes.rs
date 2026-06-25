@@ -20,7 +20,6 @@ pub struct Node {
     pub name:       String,
     pub grpc_addr:  String,
     #[serde(skip)]
-    #[allow(dead_code)]
     pub token:      String,
     pub created_at: DateTime<Utc>,
 }
