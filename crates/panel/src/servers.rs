@@ -21,6 +21,7 @@ use crate::{
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct Server {
     pub id:          Uuid,
+    pub user_id:     Uuid,
     pub node_id:     Uuid,
     pub name:        String,
     pub image:       String,
@@ -53,7 +54,7 @@ async fn list_servers(
     _user: AuthUser,
 ) -> Result<Json<Vec<Server>>> {
     let servers = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers ORDER BY created_at",
     )
     .fetch_all(&state.db)
@@ -104,10 +105,11 @@ async fn create_server(
     }
 
     let mut server = sqlx::query_as::<_, Server>(
-        "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent, env, egg_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'installing')
-         RETURNING id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at",
+        "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent, env, egg_id, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'installing')
+         RETURNING id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at",
     )
+    .bind(_admin.0.id)
     .bind(body.node_id)
     .bind(&body.name)
     .bind(&body.image)
@@ -150,7 +152,7 @@ async fn get_server(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Server>> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -165,7 +167,7 @@ async fn delete_server(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -191,7 +193,7 @@ async fn start_server(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -223,7 +225,7 @@ async fn stop_server(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -245,7 +247,7 @@ async fn provision_server(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -275,7 +277,7 @@ async fn server_command(
         .ok_or_else(|| PanelError::Validation("content field required".to_string()))?
         .to_string();
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -293,7 +295,7 @@ async fn server_stats(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -317,7 +319,7 @@ async fn stream_server_logs(
     Query(q): Query<LogsQuery>,
 ) -> Result<Sse<impl futures_util::Stream<Item = std::result::Result<Event, Infallible>> + Send>> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -560,14 +562,14 @@ mod tests {
     async fn stream_logs_returns_sse_events(pool: sqlx::PgPool) {
         let node_addr = start_log_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let (_, token) = seed_admin(&pool).await;
+        let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
         let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5) RETURNING id",
+            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
         )
-        .bind(node_id).bind("log-srv").bind("ubuntu").bind(512).bind(50)
+        .bind(admin_id).bind(node_id).bind("log-srv").bind("ubuntu").bind(512).bind(50)
         .fetch_one(&pool).await.unwrap();
 
         let app = router(make_state(pool));
@@ -644,13 +646,13 @@ mod tests {
     async fn start_server_sets_running_status(pool: sqlx::PgPool) {
         let node_addr = start_mock_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let (_, token) = seed_admin(&pool).await;
+        let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
         let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5) RETURNING id",
+            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
         )
-        .bind(node_id).bind("start-srv").bind("ubuntu").bind(512).bind(50)
+        .bind(admin_id).bind(node_id).bind("start-srv").bind("ubuntu").bind(512).bind(50)
         .fetch_one(&pool).await.unwrap();
 
         let app = router(make_state(pool.clone()));
@@ -672,13 +674,13 @@ mod tests {
     async fn start_server_sets_error_on_node_failure(pool: sqlx::PgPool) {
         let node_addr = start_fail_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let (_, token) = seed_admin(&pool).await;
+        let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
         let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5) RETURNING id",
+            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
         )
-        .bind(node_id).bind("fail-srv").bind("ubuntu").bind(512).bind(50)
+        .bind(admin_id).bind(node_id).bind("fail-srv").bind("ubuntu").bind(512).bind(50)
         .fetch_one(&pool).await.unwrap();
 
         let app = router(make_state(pool.clone()));
@@ -700,13 +702,13 @@ mod tests {
     async fn stop_server_sets_stopped_status(pool: sqlx::PgPool) {
         let node_addr = start_mock_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let (_, token) = seed_admin(&pool).await;
+        let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
         let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5) RETURNING id",
+            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
         )
-        .bind(node_id).bind("stop-srv").bind("ubuntu").bind(512).bind(50)
+        .bind(admin_id).bind(node_id).bind("stop-srv").bind("ubuntu").bind(512).bind(50)
         .fetch_one(&pool).await.unwrap();
 
         sqlx::query("UPDATE servers SET status = 'running' WHERE id = $1")
@@ -747,14 +749,14 @@ mod tests {
     async fn get_stats_proxies_to_node(pool: sqlx::PgPool) {
         let node_addr = start_mock_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let (_, token) = seed_admin(&pool).await;
+        let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
         // Insert server directly
         let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         )
-        .bind(node_id).bind("srv-x").bind("ubuntu").bind(512).bind(50)
+        .bind(admin_id).bind(node_id).bind("srv-x").bind("ubuntu").bind(512).bind(50)
         .fetch_one(&pool).await.unwrap();
 
         let app = router(make_state(pool));
