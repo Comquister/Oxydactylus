@@ -27,6 +27,7 @@ pub struct Server {
     pub memory_mb:   i32,
     pub cpu_percent: i32,
     pub env:         Vec<String>,
+    pub status:      String,
     pub created_at:  DateTime<Utc>,
 }
 
@@ -52,7 +53,7 @@ async fn list_servers(
     _user: AuthUser,
 ) -> Result<Json<Vec<Server>>> {
     let servers = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, created_at
+        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers ORDER BY created_at",
     )
     .fetch_all(&state.db)
@@ -102,10 +103,10 @@ async fn create_server(
         env.extend(egg_env);
     }
 
-    let server = sqlx::query_as::<_, Server>(
-        "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent, env, egg_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, node_id, name, image, memory_mb, cpu_percent, env, created_at",
+    let mut server = sqlx::query_as::<_, Server>(
+        "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent, env, egg_id, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'installing')
+         RETURNING id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at",
     )
     .bind(body.node_id)
     .bind(&body.name)
@@ -134,6 +135,12 @@ async fn create_server(
         return Err(e);
     }
 
+    sqlx::query("UPDATE servers SET status = 'stopped' WHERE id = $1")
+        .bind(server.id)
+        .execute(&state.db)
+        .await?;
+    server.status = "stopped".to_string();
+
     Ok((StatusCode::CREATED, Json(server)))
 }
 
@@ -143,7 +150,7 @@ async fn get_server(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Server>> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, created_at
+        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -158,7 +165,7 @@ async fn delete_server(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, created_at
+        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -184,7 +191,7 @@ async fn start_server(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, created_at
+        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -202,7 +209,7 @@ async fn stop_server(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, created_at
+        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -220,7 +227,7 @@ async fn provision_server(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, created_at
+        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -250,7 +257,7 @@ async fn server_command(
         .ok_or_else(|| PanelError::Validation("content field required".to_string()))?
         .to_string();
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, created_at
+        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -268,7 +275,7 @@ async fn server_stats(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, created_at
+        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -292,7 +299,7 @@ async fn stream_server_logs(
     Query(q): Query<LogsQuery>,
 ) -> Result<Sse<impl futures_util::Stream<Item = std::result::Result<Event, Infallible>> + Send>> {
     let server = sqlx::query_as::<_, Server>(
-        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, created_at
+        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id)
@@ -540,6 +547,33 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn create_server_returns_stopped_status(pool: sqlx::PgPool) {
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (_, token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let app = router(make_state(pool));
+        let body = serde_json::json!({
+            "node_id":     node_id,
+            "name":        "status-test",
+            "image":       "ubuntu",
+            "memory_mb":   512,
+            "cpu_percent": 50,
+        });
+        let req = Request::builder()
+            .method("POST").uri("/api/servers")
+            .header("authorization", format!("Bearer {}", token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let srv: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(srv["status"], "stopped");
     }
 
     #[sqlx::test(migrations = "./migrations")]
