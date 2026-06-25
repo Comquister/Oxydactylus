@@ -43,6 +43,10 @@ impl NodeClient {
         Ok(Self { inner: NodeServiceClient::with_interceptor(channel, interceptor) })
     }
 
+    pub async fn new(node: &crate::nodes::Node) -> Result<Self> {
+        Self::connect(&node.grpc_addr, &node.token).await
+    }
+
     pub async fn provision(
         &mut self,
         server_id:   &str,
