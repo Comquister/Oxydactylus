@@ -1,9 +1,12 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, post},
+    response::sse::{Event, Sse},
+    routing::{delete, get, post},
     Json, Router,
 };
+use futures_util::StreamExt;
+use std::convert::Infallible;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -70,6 +73,12 @@ struct CreateServerRequest {
     egg_id:      Option<Uuid>,
     #[serde(default)]
     egg_vars:    std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    #[serde(default)]
+    follow: bool,
 }
 
 async fn create_server(
@@ -276,6 +285,36 @@ async fn server_stats(
     })))
 }
 
+async fn stream_server_logs(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<Uuid>,
+    Query(q): Query<LogsQuery>,
+) -> Result<Sse<impl futures_util::Stream<Item = std::result::Result<Event, Infallible>> + Send>> {
+    let server = sqlx::query_as::<_, Server>(
+        "SELECT id, node_id, name, image, memory_mb, cpu_percent, env, created_at
+         FROM servers WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+
+    let mut client = get_node_client(&state, server.node_id).await?;
+    let log_stream = client.stream_logs(&server.id.to_string(), q.follow).await?;
+
+    let sse_stream = log_stream.map(|result| {
+        let event = match result {
+            Ok(line) => Event::default()
+                .event(line.stream)
+                .data(line.content.trim_end_matches('\n')),
+            Err(e) => Event::default().event("error").data(e.to_string()),
+        };
+        Ok::<Event, Infallible>(event)
+    });
+
+    Ok(Sse::new(sse_stream))
+}
+
 pub fn servers_router() -> Router<AppState> {
     Router::new()
         .route("/",              get(list_servers).post(create_server))
@@ -285,6 +324,7 @@ pub fn servers_router() -> Router<AppState> {
         .route("/:id/provision", post(provision_server))
         .route("/:id/command",   post(server_command))
         .route("/:id/stats",     get(server_stats))
+        .route("/:id/logs",      get(stream_server_logs))
 }
 
 #[cfg(test)]
@@ -380,6 +420,101 @@ mod tests {
         )
         .bind("test-node").bind(grpc_addr).bind("node-token")
         .fetch_one(pool).await.unwrap()
+    }
+
+    struct LogNode;
+
+    #[async_trait]
+    impl NodeService for LogNode {
+        type StreamLogsStream = ReceiverStream<std::result::Result<LogLine, Status>>;
+
+        async fn provision_server(&self, _: GrpcRequest<ServerProvisionRequest>)
+            -> std::result::Result<Response<ServerReply>, Status>
+        { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+        async fn start_server(&self, _: GrpcRequest<ServerStartRequest>)
+            -> std::result::Result<Response<ServerReply>, Status>
+        { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+        async fn stop_server(&self, _: GrpcRequest<ServerStopRequest>)
+            -> std::result::Result<Response<ServerReply>, Status>
+        { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+        async fn delete_server(&self, _: GrpcRequest<ServerDeleteRequest>)
+            -> std::result::Result<Response<ServerReply>, Status>
+        { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+        async fn send_command(&self, _: GrpcRequest<ServerCommandRequest>)
+            -> std::result::Result<Response<ServerReply>, Status>
+        { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
+        async fn get_stats(&self, req: GrpcRequest<ServerStatsRequest>)
+            -> std::result::Result<Response<ServerStats>, Status>
+        {
+            Ok(Response::new(ServerStats {
+                server_id: req.into_inner().server_id,
+                memory_bytes: 0, cpu_percent: 0.0, rx_bytes: 0, tx_bytes: 0,
+            }))
+        }
+        async fn stream_logs(&self, _: GrpcRequest<ServerLogsRequest>)
+            -> std::result::Result<Response<Self::StreamLogsStream>, Status>
+        {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _ = tx.send(Ok(LogLine {
+                    content: "starting up\n".into(), stream: "stdout".into(), timestamp: 0,
+                })).await;
+                let _ = tx.send(Ok(LogLine {
+                    content: "ready\n".into(), stream: "stdout".into(), timestamp: 0,
+                })).await;
+            });
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+    }
+
+    async fn start_log_node(token: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let t = token.to_string();
+        tokio::spawn(async move {
+            use oxy_node::interceptor::AuthInterceptor;
+            tonic::transport::Server::builder()
+                .add_service(NodeServiceServer::with_interceptor(
+                    LogNode,
+                    AuthInterceptor::new(&t),
+                ))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        format!("http://127.0.0.1:{}", port)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn stream_logs_returns_sse_events(pool: sqlx::PgPool) {
+        let node_addr = start_log_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (_, token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO servers (node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5) RETURNING id",
+        )
+        .bind(node_id).bind("log-srv").bind("ubuntu").bind(512).bind(50)
+        .fetch_one(&pool).await.unwrap();
+
+        let app = router(make_state(pool));
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/servers/{}/logs", server_id))
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.contains("text/event-stream"), "expected SSE, got {}", ct);
+
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(body.contains("data:"), "SSE body missing data lines:\n{}", body);
+        assert!(body.contains("starting up"), "first log line missing:\n{}", body);
     }
 
     #[sqlx::test(migrations = "./migrations")]
