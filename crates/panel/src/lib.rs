@@ -5,6 +5,7 @@ pub mod node_client;
 mod nodes;
 mod servers;
 mod users;
+mod eggs;
 
 pub use error::{PanelError, Result};
 
@@ -23,6 +24,7 @@ pub fn router(state: AppState) -> axum::Router {
         .nest("/api/users",   users::users_router())
         .nest("/api/nodes",   nodes::nodes_router())
         .nest("/api/servers", servers::servers_router())
+        .nest("/api/eggs",    eggs::eggs_router())
         .with_state(state)
 }
 
