@@ -126,6 +126,7 @@ impl<B: DockerBackend> NodeService for NodeServiceImpl<B> {
                 memory_mb:   r.memory_mb as i64,
                 cpu_percent: r.cpu_percent as i64,
                 env:         r.env,
+                ports:       r.ports,
             })
             .await
             .map_err(Status::from)?;
@@ -293,6 +294,7 @@ mod tests {
                     assert_eq!(spec.memory_mb, 1024);
                     assert_eq!(spec.cpu_percent, 100);
                     assert_eq!(spec.env, vec!["EULA=TRUE"]);
+                    assert_eq!(spec.ports, vec!["0.0.0.0:25565:25565/tcp"]);
                     Ok("container-id-xyz".to_string())
                 }.boxed()
             });
@@ -305,6 +307,7 @@ mod tests {
                     memory_mb:   1024,
                     cpu_percent: 100,
                     env:         vec!["EULA=TRUE".into()],
+                    ports:       vec!["0.0.0.0:25565:25565/tcp".into()],
                 },
             ))
             .await

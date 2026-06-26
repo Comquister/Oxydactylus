@@ -56,4 +56,5 @@ message ServerProvisionRequest {
     uint32          memory_mb   = 3;
     uint32          cpu_percent = 4;
     repeated string env         = 5;
+    repeated string ports       = 6;
 }

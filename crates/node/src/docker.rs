@@ -8,6 +8,7 @@ pub struct ContainerSpec {
     pub env:         Vec<String>,
     pub memory_mb:   i64,
     pub cpu_percent: i64,
+    pub ports:       Vec<String>,
 }
 
 pub struct ContainerStats {
@@ -51,12 +52,32 @@ impl BollardDocker {
 impl DockerBackend for BollardDocker {
     async fn create_container(&self, spec: ContainerSpec) -> Result<String> {
         use bollard::container::{Config, CreateContainerOptions};
-        use bollard::models::HostConfig;
+        use bollard::models::{HostConfig, PortBinding};
+        use std::collections::HashMap;
 
         if spec.memory_mb <= 0 || spec.cpu_percent <= 0 {
             return Err(NodeError::Validation(
                 "memory_mb and cpu_percent must be positive".into(),
             ));
+        }
+
+        let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+        for entry in &spec.ports {
+            let parts: Vec<&str> = entry.splitn(3, ':').collect();
+            let (host_ip, host_port, container_part) = match parts.as_slice() {
+                [ip, hp, cp] => (ip.to_string(), hp.to_string(), cp.to_string()),
+                [hp, cp]     => ("0.0.0.0".to_string(), hp.to_string(), cp.to_string()),
+                _            => continue,
+            };
+            let key = if container_part.contains('/') {
+                container_part
+            } else {
+                format!("{}/tcp", container_part)
+            };
+            port_bindings.insert(key, Some(vec![PortBinding {
+                host_ip:   Some(host_ip),
+                host_port: Some(host_port),
+            }]));
         }
 
         let opts = CreateContainerOptions {
@@ -69,8 +90,9 @@ impl DockerBackend for BollardDocker {
             open_stdin:  Some(true),
             stdin_once:  Some(false),
             host_config: Some(HostConfig {
-                memory:    Some(spec.memory_mb * 1024 * 1024),
-                nano_cpus: Some(spec.cpu_percent * 10_000_000),
+                memory:         Some(spec.memory_mb * 1024 * 1024),
+                nano_cpus:      Some(spec.cpu_percent * 10_000_000),
+                port_bindings:  Some(port_bindings),
                 ..Default::default()
             }),
             ..Default::default()
@@ -232,6 +254,7 @@ mod tests {
             env:         vec!["PORT=25565".into()],
             memory_mb:   512,
             cpu_percent: 50,
+            ports:       vec![],
         }).await.unwrap();
 
         assert_eq!(id, "abc123");

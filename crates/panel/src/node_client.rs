@@ -54,6 +54,7 @@ impl NodeClient {
         memory_mb: u32,
         cpu_percent: u32,
         env: Vec<String>,
+        ports: Vec<String>,
     ) -> Result<()> {
         self.inner
             .provision_server(ServerProvisionRequest {
@@ -62,6 +63,7 @@ impl NodeClient {
                 memory_mb,
                 cpu_percent,
                 env,
+                ports,
             })
             .await
             .map(|_| ())
@@ -255,7 +257,7 @@ mod tests {
 
         let mut client = NodeClient::connect(&addr, token).await.unwrap();
         client
-            .provision("srv-1", "ubuntu:latest", 512, 50, vec!["X=1".into()])
+            .provision("srv-1", "ubuntu:latest", 512, 50, vec!["X=1".into()], vec![])
             .await
             .unwrap();
         client.start("srv-1").await.unwrap();

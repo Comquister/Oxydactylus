@@ -106,6 +106,18 @@ async fn get_node_client(state: &AppState, node_id: Uuid) -> Result<NodeClient> 
     NodeClient::connect(&row.grpc_addr, &row.token).await
 }
 
+async fn fetch_server_ports(state: &AppState, server_id: Uuid) -> Result<Vec<String>> {
+    let sql = crate::db::port_sql(
+        "SELECT ip, port FROM allocations WHERE server_id = $1",
+        &state.db_backend,
+    );
+    let rows: Vec<(String, i32)> = sqlx::query_as(&sql)
+        .bind(server_id.to_string())
+        .fetch_all(&state.db)
+        .await?;
+    Ok(rows.into_iter().map(|(ip, port)| format!("{}:{}:{}/tcp", ip, port, port)).collect())
+}
+
 async fn fetch_server(db: &sqlx::AnyPool, id: Uuid) -> Result<Server> {
     sqlx::query_as::<_, Server>(
         "SELECT id, user_id, node_id, allocation_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
@@ -186,6 +198,8 @@ struct CreateServerRequest {
     egg_vars: std::collections::HashMap<String, String>,
     #[serde(default)]
     user_id: Option<Uuid>,
+    #[serde(default)]
+    allocation_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,6 +255,40 @@ async fn create_server(
         .fetch_one(&state.db)
     .await?;
 
+    if let Some(alloc_id) = body.allocation_id {
+        let link_sql = crate::db::port_sql(
+            "UPDATE allocations SET server_id = $1 WHERE id = $2 AND node_id = $3 AND server_id IS NULL",
+            &state.db_backend,
+        );
+        let rows = sqlx::query(&link_sql)
+            .bind(server.id.to_string())
+            .bind(alloc_id.to_string())
+            .bind(body.node_id.to_string())
+            .execute(&state.db)
+            .await?
+            .rows_affected();
+        if rows == 0 {
+            let _ = sqlx::query("DELETE FROM servers WHERE id = $1")
+                .bind(server.id.to_string())
+                .execute(&state.db)
+                .await;
+            return Err(PanelError::Validation(
+                "allocation not found, wrong node, or already assigned".to_string(),
+            ));
+        }
+        let set_primary_sql = crate::db::port_sql(
+            "UPDATE servers SET allocation_id = $1 WHERE id = $2",
+            &state.db_backend,
+        );
+        sqlx::query(&set_primary_sql)
+            .bind(alloc_id.to_string())
+            .bind(server.id.to_string())
+            .execute(&state.db)
+            .await?;
+        server.allocation_id = Some(alloc_id);
+    }
+
+    let ports = fetch_server_ports(&state, server.id).await?;
     let mut client = get_node_client(&state, server.node_id).await?;
     if let Err(e) = client
         .provision(
@@ -249,6 +297,7 @@ async fn create_server(
             server.memory_mb as u32,
             server.cpu_percent as u32,
             env,
+            ports,
         )
         .await
     {
@@ -378,6 +427,7 @@ async fn provision_server(
 ) -> Result<StatusCode> {
     let server = fetch_server(&state.db, id).await?;
 
+    let ports = fetch_server_ports(&state, server.id).await?;
     let mut client = get_node_client(&state, server.node_id).await?;
     client
         .provision(
@@ -386,6 +436,7 @@ async fn provision_server(
             server.memory_mb as u32,
             server.cpu_percent as u32,
             server.env.clone(),
+            ports,
         )
         .await?;
     Ok(StatusCode::NO_CONTENT)
