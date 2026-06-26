@@ -157,12 +157,25 @@ struct TokenResponse {
     is_admin: bool,
 }
 
-#[derive(sqlx::FromRow)]
 struct UserRow {
     id: Uuid,
     email: String,
     password_hash: String,
     is_admin: bool,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for UserRow {
+    fn from_row(row: &'r sqlx::any::AnyRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let id_str: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        Ok(Self {
+            id,
+            email: row.try_get("email")?,
+            password_hash: row.try_get("password_hash")?,
+            is_admin: row.try_get("is_admin")?,
+        })
+    }
 }
 
 async fn login(
@@ -276,9 +289,15 @@ mod tests {
     use tower::ServiceExt;
 
     async fn make_state(pool: sqlx::PgPool) -> AppState {
+        use sqlx::ConnectOptions;
+        sqlx::any::install_default_drivers();
+        let db_url = pool.connect_options().to_url_lossy().to_string();
+        let any_pool = sqlx::AnyPool::connect(&db_url).await.unwrap();
         AppState {
-            db: pool,
+            db: any_pool,
+            db_backend: "PostgreSQL".to_string(),
             jwt_secret: SECRET.to_string(),
+            app_key: None,
         }
     }
 
@@ -286,10 +305,12 @@ mod tests {
     async fn login_with_valid_credentials_returns_tokens(pool: sqlx::PgPool) {
         let state = make_state(pool.clone()).await;
         let hash = hash_password("password123").unwrap();
-        sqlx::query("INSERT INTO users (email, password_hash, is_admin) VALUES ($1, $2, $3)")
+        sqlx::query("INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)")
+            .bind(Uuid::new_v4().to_string())
             .bind("admin@example.com")
             .bind(&hash)
             .bind(true)
+            .bind(chrono::Utc::now().to_rfc3339())
             .execute(&pool)
             .await
             .unwrap();
@@ -318,10 +339,12 @@ mod tests {
     async fn login_with_wrong_password_returns_401(pool: sqlx::PgPool) {
         let state = make_state(pool.clone()).await;
         let hash = hash_password("correct").unwrap();
-        sqlx::query("INSERT INTO users (email, password_hash, is_admin) VALUES ($1, $2, $3)")
+        sqlx::query("INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)")
+            .bind(Uuid::new_v4().to_string())
             .bind("user@example.com")
             .bind(&hash)
             .bind(false)
+            .bind(chrono::Utc::now().to_rfc3339())
             .execute(&pool)
             .await
             .unwrap();
@@ -343,15 +366,18 @@ mod tests {
     async fn auth_via_query_token_param(pool: sqlx::PgPool) {
         let state = make_state(pool.clone()).await;
         let hash = hash_password("pass").unwrap();
-        let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (email, password_hash, is_admin) VALUES ($1,$2,$3) RETURNING id",
+        let user_id_str: String = sqlx::query_scalar(
+            "INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1,$2,$3,$4,$5) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("q@example.com")
         .bind(&hash)
         .bind(false)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let user_id = Uuid::parse_str(&user_id_str).unwrap();
 
         let token = encode_token(user_id, false, "access", SECRET, 900).unwrap();
 

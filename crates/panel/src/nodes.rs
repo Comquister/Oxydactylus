@@ -14,7 +14,7 @@ use crate::{
     AppState,
 };
 
-#[derive(Debug, sqlx::FromRow, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Node {
     pub id: Uuid,
     pub name: String,
@@ -22,6 +22,25 @@ pub struct Node {
     #[serde(skip)]
     pub token: String,
     pub created_at: DateTime<Utc>,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for Node {
+    fn from_row(row: &'r sqlx::any::AnyRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let id_str: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let created_at_str: String = row.try_get("created_at")?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        Ok(Self {
+            id,
+            name: row.try_get("name")?,
+            grpc_addr: row.try_get("grpc_addr")?,
+            token: row.try_get("token")?,
+            created_at,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,11 +51,13 @@ struct CreateNodeRequest {
 }
 
 async fn list_nodes(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Vec<Node>>> {
-    let nodes = sqlx::query_as::<_, Node>(
+    let sql = crate::db::port_sql(
         "SELECT id, name, grpc_addr, token, created_at FROM nodes ORDER BY created_at",
-    )
-    .fetch_all(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let nodes = sqlx::query_as::<_, Node>(&sql)
+        .fetch_all(&state.db)
+        .await?;
     Ok(Json(nodes))
 }
 
@@ -50,16 +71,22 @@ async fn create_node(
             "name, grpc_addr, and token are required".to_string(),
         ));
     }
-    let node = sqlx::query_as::<_, Node>(
-        "INSERT INTO nodes (name, grpc_addr, token)
-         VALUES ($1, $2, $3)
+    let id = Uuid::new_v4().to_string();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let sql = crate::db::port_sql(
+        "INSERT INTO nodes (id, name, grpc_addr, token, created_at)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING id, name, grpc_addr, token, created_at",
-    )
-    .bind(&body.name)
-    .bind(&body.grpc_addr)
-    .bind(&body.token)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let node = sqlx::query_as::<_, Node>(&sql)
+        .bind(&id)
+        .bind(&body.name)
+        .bind(&body.grpc_addr)
+        .bind(&body.token)
+        .bind(&created_at)
+        .fetch_one(&state.db)
+        .await?;
     Ok((StatusCode::CREATED, Json(node)))
 }
 
@@ -68,8 +95,12 @@ async fn delete_node(
     _admin: AdminUser,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
-    let rows = sqlx::query("DELETE FROM nodes WHERE id = $1")
-        .bind(id)
+    let sql = crate::db::port_sql(
+        "DELETE FROM nodes WHERE id = $1",
+        &state.db_backend,
+    );
+    let rows = sqlx::query(&sql)
+        .bind(id.to_string())
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -102,10 +133,16 @@ mod tests {
 
     const SECRET: &str = "test-secret-at-least-32-chars-long!!";
 
-    fn make_state(pool: sqlx::PgPool) -> AppState {
+    async fn make_state(pool: sqlx::PgPool) -> AppState {
+        use sqlx::ConnectOptions;
+        sqlx::any::install_default_drivers();
+        let db_url = pool.connect_options().to_url_lossy().to_string();
+        let any_pool = sqlx::AnyPool::connect(&db_url).await.unwrap();
         AppState {
-            db: pool,
+            db: any_pool,
+            db_backend: "PostgreSQL".to_string(),
             jwt_secret: SECRET.to_string(),
+            app_key: None,
         }
     }
 
@@ -113,12 +150,13 @@ mod tests {
         let id = Uuid::new_v4();
         let hash = hash_password("pass").unwrap();
         sqlx::query(
-            "INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)",
         )
-        .bind(id)
+        .bind(id.to_string())
         .bind("a@t.com")
         .bind(&hash)
         .bind(true)
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(pool)
         .await
         .unwrap();
@@ -128,7 +166,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn create_node_and_list(pool: sqlx::PgPool) {
         let token = seed_admin(&pool).await;
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
 
         let body = serde_json::json!({
             "name": "node-eu-1",
@@ -166,18 +204,20 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn delete_node_returns_204(pool: sqlx::PgPool) {
         let token = seed_admin(&pool).await;
-        // insert a node directly
-        let node_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO nodes (name, grpc_addr, token) VALUES ($1, $2, $3) RETURNING id",
+        let node_id_str: String = sqlx::query_scalar(
+            "INSERT INTO nodes (id, name, grpc_addr, token, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("n1")
         .bind("http://localhost:8080")
         .bind("tok")
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let node_id = Uuid::parse_str(&node_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("DELETE")
             .uri(format!("/api/nodes/{}", node_id))

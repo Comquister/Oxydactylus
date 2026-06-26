@@ -19,41 +19,99 @@ use crate::{
     subusers, AppState,
 };
 
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Server {
     pub id: Uuid,
     pub user_id: Uuid,
     pub node_id: Uuid,
+    pub allocation_id: Option<Uuid>,
     pub name: String,
     pub image: String,
     pub memory_mb: i32,
     pub cpu_percent: i32,
     pub env: Vec<String>,
     pub status: String,
+    pub database_limit: i32,
+    pub backup_limit: i32,
+    pub allocation_limit: i32,
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for Server {
+    fn from_row(row: &'r sqlx::any::AnyRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let id_str: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let user_id_str: String = row.try_get("user_id")?;
+        let user_id = Uuid::parse_str(&user_id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let node_id_str: String = row.try_get("node_id")?;
+        let node_id = Uuid::parse_str(&node_id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        let allocation_id_opt: Option<String> = row.try_get("allocation_id")?;
+        let allocation_id = match allocation_id_opt {
+            Some(s) if !s.is_empty() => Some(Uuid::parse_str(&s).map_err(|e| sqlx::Error::Decode(Box::new(e)))?),
+            _ => None,
+        };
+
+        let env_str: String = row.try_get("env")?;
+        let env: Vec<String> = serde_json::from_str(&env_str)
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        let created_at_str: String = row.try_get("created_at")?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        Ok(Self {
+            id,
+            user_id,
+            node_id,
+            allocation_id,
+            name: row.try_get("name")?,
+            image: row.try_get("image")?,
+            memory_mb: row.try_get("memory_mb")?,
+            cpu_percent: row.try_get("cpu_percent")?,
+            env,
+            status: row.try_get("status")?,
+            database_limit: row.try_get("database_limit")?,
+            backup_limit: row.try_get("backup_limit")?,
+            allocation_limit: row.try_get("allocation_limit")?,
+            created_at,
+        })
+    }
+}
+
+#[derive(Debug)]
 struct NodeRow {
     grpc_addr: String,
     token: String,
 }
 
+impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for NodeRow {
+    fn from_row(row: &'r sqlx::any::AnyRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(Self {
+            grpc_addr: row.try_get("grpc_addr")?,
+            token: row.try_get("token")?,
+        })
+    }
+}
+
 async fn get_node_client(state: &AppState, node_id: Uuid) -> Result<NodeClient> {
     let row = sqlx::query_as::<_, NodeRow>("SELECT grpc_addr, token FROM nodes WHERE id = $1")
-        .bind(node_id)
+        .bind(node_id.to_string())
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| PanelError::NotFound(format!("node {}", node_id)))?;
     NodeClient::connect(&row.grpc_addr, &row.token).await
 }
 
-async fn fetch_server(db: &sqlx::PgPool, id: Uuid) -> Result<Server> {
+async fn fetch_server(db: &sqlx::AnyPool, id: Uuid) -> Result<Server> {
     sqlx::query_as::<_, Server>(
-        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+        "SELECT id, user_id, node_id, allocation_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
          FROM servers WHERE id = $1",
     )
-    .bind(id)
+    .bind(id.to_string())
     .fetch_one(db)
     .await
     .map_err(Into::into)
@@ -63,19 +121,25 @@ pub(crate) async fn check_server_access(
     user: &AuthUser,
     server: &Server,
     perm: Option<&str>,
-    db: &sqlx::PgPool,
+    db: &sqlx::AnyPool,
 ) -> Result<()> {
     if user.is_admin || server.user_id == user.id {
         return Ok(());
     }
-    let perms: Vec<String> = sqlx::query_scalar(
-        "SELECT unnest(permissions) FROM server_subusers
+    let permissions_str: Option<String> = sqlx::query_scalar(
+        "SELECT permissions FROM server_subusers
          WHERE server_id = $1 AND user_id = $2",
     )
-    .bind(server.id)
-    .bind(user.id)
-    .fetch_all(db)
+    .bind(server.id.to_string())
+    .bind(user.id.to_string())
+    .fetch_optional(db)
     .await?;
+
+    let perms: Vec<String> = match permissions_str {
+        Some(s) => serde_json::from_str(&s).map_err(|e| PanelError::Internal(e.to_string()))?,
+        None => return Err(PanelError::Forbidden),
+    };
+
     if perms.is_empty() {
         return Err(PanelError::Forbidden);
     }
@@ -90,17 +154,17 @@ pub(crate) async fn check_server_access(
 async fn list_servers(State(state): State<AppState>, user: AuthUser) -> Result<Json<Vec<Server>>> {
     let servers = if user.is_admin {
         sqlx::query_as::<_, Server>(
-            "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+            "SELECT id, user_id, node_id, allocation_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
              FROM servers ORDER BY created_at",
         )
         .fetch_all(&state.db)
         .await?
     } else {
         sqlx::query_as::<_, Server>(
-            "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+            "SELECT id, user_id, node_id, allocation_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
              FROM servers WHERE user_id = $1 ORDER BY created_at",
         )
-        .bind(user.id)
+        .bind(user.id.to_string())
         .fetch_all(&state.db)
         .await?
     };
@@ -155,20 +219,26 @@ async fn create_server(
         env.extend(egg_env);
     }
 
-    let mut server = sqlx::query_as::<_, Server>(
-        "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent, env, egg_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'installing')
-         RETURNING id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at",
-    )
-    .bind(owner_id)
-    .bind(body.node_id)
-    .bind(&body.name)
-    .bind(&body.image)
-    .bind(body.memory_mb)
-    .bind(body.cpu_percent)
-    .bind(&env)
-    .bind(body.egg_id)
-    .fetch_one(&state.db)
+    let id = Uuid::new_v4().to_string();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let sql = crate::db::port_sql(
+        "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, env, egg_id, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'installing', $10)
+         RETURNING id, user_id, node_id, allocation_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at",
+        &state.db_backend,
+    );
+    let mut server = sqlx::query_as::<_, Server>(&sql)
+        .bind(&id)
+        .bind(owner_id.to_string())
+        .bind(body.node_id.to_string())
+        .bind(&body.name)
+        .bind(&body.image)
+        .bind(body.memory_mb)
+        .bind(body.cpu_percent)
+        .bind(serde_json::to_string(&env).unwrap())
+        .bind(body.egg_id.map(|id| id.to_string()))
+        .bind(&created_at)
+        .fetch_one(&state.db)
     .await?;
 
     let mut client = get_node_client(&state, server.node_id).await?;
@@ -184,14 +254,14 @@ async fn create_server(
     {
         // compensating delete — best effort; ignore failure
         let _ = sqlx::query("DELETE FROM servers WHERE id = $1")
-            .bind(server.id)
+            .bind(server.id.to_string())
             .execute(&state.db)
             .await;
         return Err(e);
     }
 
     sqlx::query("UPDATE servers SET status = 'stopped' WHERE id = $1")
-        .bind(server.id)
+        .bind(server.id.to_string())
         .execute(&state.db)
         .await?;
     server.status = "stopped".to_string();
@@ -224,7 +294,7 @@ async fn delete_server(
     }
 
     sqlx::query("DELETE FROM servers WHERE id = $1")
-        .bind(id)
+        .bind(id.to_string())
         .execute(&state.db)
         .await?;
 
@@ -242,14 +312,14 @@ async fn start_server(
     match client.start(&server.id.to_string()).await {
         Ok(_) => {
             sqlx::query("UPDATE servers SET status = 'running' WHERE id = $1")
-                .bind(server.id)
+                .bind(server.id.to_string())
                 .execute(&state.db)
                 .await?;
             Ok(StatusCode::NO_CONTENT)
         }
         Err(e) => {
             let _ = sqlx::query("UPDATE servers SET status = 'error' WHERE id = $1")
-                .bind(server.id)
+                .bind(server.id.to_string())
                 .execute(&state.db)
                 .await;
             Err(e)
@@ -267,7 +337,7 @@ async fn stop_server(
     let mut client = get_node_client(&state, server.node_id).await?;
     client.stop(&server.id.to_string(), 10).await?;
     sqlx::query("UPDATE servers SET status = 'stopped' WHERE id = $1")
-        .bind(server.id)
+        .bind(server.id.to_string())
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -286,14 +356,14 @@ async fn restart_server(
     match client.start(&server.id.to_string()).await {
         Ok(_) => {
             sqlx::query("UPDATE servers SET status = 'running' WHERE id = $1")
-                .bind(server.id)
+                .bind(server.id.to_string())
                 .execute(&state.db)
                 .await?;
             Ok(StatusCode::NO_CONTENT)
         }
         Err(e) => {
             let _ = sqlx::query("UPDATE servers SET status = 'error' WHERE id = $1")
-                .bind(server.id)
+                .bind(server.id.to_string())
                 .execute(&state.db)
                 .await;
             Err(e)
@@ -425,10 +495,16 @@ mod tests {
 
     const SECRET: &str = "test-secret-at-least-32-chars-long!!";
 
-    fn make_state(pool: sqlx::PgPool) -> AppState {
+    async fn make_state(pool: sqlx::PgPool) -> AppState {
+        use sqlx::ConnectOptions;
+        sqlx::any::install_default_drivers();
+        let db_url = pool.connect_options().to_url_lossy().to_string();
+        let any_pool = sqlx::AnyPool::connect(&db_url).await.unwrap();
         AppState {
-            db: pool,
+            db: any_pool,
+            db_backend: "PostgreSQL".to_string(),
             jwt_secret: SECRET.to_string(),
+            app_key: None,
         }
     }
 
@@ -436,12 +512,13 @@ mod tests {
         let id = Uuid::new_v4();
         let hash = hash_password("pass").unwrap();
         sqlx::query(
-            "INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)",
         )
-        .bind(id)
+        .bind(id.to_string())
         .bind("a@t.com")
         .bind(&hash)
         .bind(true)
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(pool)
         .await
         .unwrap();
@@ -539,15 +616,18 @@ mod tests {
     }
 
     async fn seed_node(pool: &sqlx::PgPool, grpc_addr: &str) -> Uuid {
-        sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO nodes (name, grpc_addr, token) VALUES ($1, $2, $3) RETURNING id",
+        let id_str: String = sqlx::query_scalar(
+            "INSERT INTO nodes (id, name, grpc_addr, token, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("test-node")
         .bind(grpc_addr)
         .bind("node-token")
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(pool)
         .await
-        .unwrap()
+        .unwrap();
+        Uuid::parse_str(&id_str).unwrap()
     }
 
     struct LogNode;
@@ -743,21 +823,24 @@ mod tests {
         let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
-        let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("log-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("GET")
             .uri(format!("/api/servers/{}/logs", server_id))
@@ -791,7 +874,7 @@ mod tests {
         let (_, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "node_id":     node_id,
             "name":        "mc-server-1",
@@ -819,16 +902,19 @@ mod tests {
         let node_id = seed_node(&pool, &node_addr).await;
 
         // criar segundo usuário para testar atribuição explícita
-        let owner_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        let owner_id_str: String = sqlx::query_scalar(
+            "INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("owner@test.com")
         .bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let owner_id = Uuid::parse_str(&owner_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "node_id":     node_id,
             "user_id":     owner_id,
@@ -860,7 +946,7 @@ mod tests {
         let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "node_id":     node_id,
             "name":        "admin-server",
@@ -889,7 +975,7 @@ mod tests {
         let (_, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "node_id":     node_id,
             "name":        "status-test",
@@ -917,21 +1003,24 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
-        let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("start-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
-        let app = router(make_state(pool.clone()));
+        let app = router(make_state(pool.clone()).await);
         let req = Request::builder()
             .method("POST")
             .uri(format!("/api/servers/{}/start", server_id))
@@ -942,7 +1031,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
         let status: String = sqlx::query_scalar("SELECT status FROM servers WHERE id = $1")
-            .bind(server_id)
+            .bind(server_id.to_string())
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -955,21 +1044,24 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
-        let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("fail-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
-        let app = router(make_state(pool.clone()));
+        let app = router(make_state(pool.clone()).await);
         let req = Request::builder()
             .method("POST")
             .uri(format!("/api/servers/{}/start", server_id))
@@ -984,7 +1076,7 @@ mod tests {
         );
 
         let status: String = sqlx::query_scalar("SELECT status FROM servers WHERE id = $1")
-            .bind(server_id)
+            .bind(server_id.to_string())
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -997,27 +1089,30 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
-        let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("stop-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
         sqlx::query("UPDATE servers SET status = 'running' WHERE id = $1")
-            .bind(server_id)
+            .bind(server_id.to_string())
             .execute(&pool)
             .await
             .unwrap();
 
-        let app = router(make_state(pool.clone()));
+        let app = router(make_state(pool.clone()).await);
         let req = Request::builder()
             .method("POST")
             .uri(format!("/api/servers/{}/stop", server_id))
@@ -1028,7 +1123,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
         let status: String = sqlx::query_scalar("SELECT status FROM servers WHERE id = $1")
-            .bind(server_id)
+            .bind(server_id.to_string())
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -1038,7 +1133,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn list_servers_returns_empty(pool: sqlx::PgPool) {
         let (_, token) = seed_admin(&pool).await;
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("GET")
             .uri("/api/servers")
@@ -1058,22 +1153,24 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
-        // Insert server directly
-        let server_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("srv-x")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("GET")
             .uri(format!("/api/servers/{}/stats", server_id))
@@ -1095,21 +1192,27 @@ mod tests {
         let node_id = seed_node(&pool, &node_addr).await;
 
         // create egg + variable
-        let egg_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO eggs (name, start_cmd, docker_images) VALUES ($1, $2, $3) RETURNING id",
+        let egg_id_str: String = sqlx::query_scalar(
+            "INSERT INTO eggs (id, name, start_cmd, docker_images, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("Purpur")
         .bind("java -jar server.jar")
-        .bind(serde_json::json!({}))
+        .bind(serde_json::to_string(&serde_json::json!({})).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let egg_id = Uuid::parse_str(&egg_id_str).unwrap();
 
         sqlx::query(
-            "INSERT INTO egg_variables (egg_id, name, env_variable, default_val, field_type)
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO egg_variables (id, egg_id, name, env_variable, default_val, field_type)
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
-        .bind(egg_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(egg_id.to_string())
         .bind("Jar")
         .bind("SERVER_JARFILE")
         .bind("server.jar")
@@ -1118,7 +1221,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "node_id":     node_id,
             "name":        "mc-egg-server",
@@ -1154,48 +1257,55 @@ mod tests {
         let node_id = seed_node(&pool, &node_addr).await;
 
         // criar segundo usuário
-        let other_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        let other_id_str: String = sqlx::query_scalar(
+            "INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("other@test.com")
         .bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let other_id = Uuid::parse_str(&other_id_str).unwrap();
         let other_token =
             crate::auth::encode_token(other_id, false, "access", SECRET, 900).unwrap();
 
         // admin cria servidor para si mesmo
         sqlx::query(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6)",
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("admin-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(&pool)
         .await
         .unwrap();
 
         // admin cria servidor para other
         sqlx::query(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6)",
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         )
-        .bind(other_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(other_id.to_string())
+        .bind(node_id.to_string())
         .bind("other-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(&pool)
         .await
         .unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
 
         // admin vê os dois
         let req = Request::builder()
@@ -1230,32 +1340,38 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
-        let other_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        let other_id_str: String = sqlx::query_scalar(
+            "INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("other2@test.com")
         .bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let other_id = Uuid::parse_str(&other_id_str).unwrap();
         let other_token =
             crate::auth::encode_token(other_id, false, "access", SECRET, 900).unwrap();
 
-        let server_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("forbidden-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("GET")
             .uri(format!("/api/servers/{}", server_id))
@@ -1273,43 +1389,52 @@ mod tests {
         let (admin_id, _) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
-        let subuser_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        let subuser_id_str: String = sqlx::query_scalar(
+            "INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("sub@test.com")
         .bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let subuser_id = Uuid::parse_str(&subuser_id_str).unwrap();
         let sub_token =
             crate::auth::encode_token(subuser_id, false, "access", SECRET, 900).unwrap();
 
-        let server_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("sub-start-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
         // adicionar subuser com control.start
         sqlx::query(
-            "INSERT INTO server_subusers (server_id, user_id, permissions)
-             VALUES ($1, $2, ARRAY['control.start'])",
+            "INSERT INTO server_subusers (id, server_id, user_id, permissions, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
         )
-        .bind(server_id)
-        .bind(subuser_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(server_id.to_string())
+        .bind(subuser_id.to_string())
+        .bind(serde_json::to_string(&vec!["control.start"]).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(&pool)
         .await
         .unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("POST")
             .uri(format!("/api/servers/{}/start", server_id))
@@ -1327,43 +1452,52 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
-        let subuser_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        let subuser_id_str: String = sqlx::query_scalar(
+            "INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("nosub@test.com")
         .bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let subuser_id = Uuid::parse_str(&subuser_id_str).unwrap();
         let sub_token =
             crate::auth::encode_token(subuser_id, false, "access", SECRET, 900).unwrap();
 
-        let server_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("nosub-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
         // subuser com control.start mas NÃO control.stop
         sqlx::query(
-            "INSERT INTO server_subusers (server_id, user_id, permissions)
-             VALUES ($1, $2, ARRAY['control.start'])",
+            "INSERT INTO server_subusers (id, server_id, user_id, permissions, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
         )
-        .bind(server_id)
-        .bind(subuser_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(server_id.to_string())
+        .bind(subuser_id.to_string())
+        .bind(serde_json::to_string(&vec!["control.start"]).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(&pool)
         .await
         .unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("POST")
             .uri(format!("/api/servers/{}/stop", server_id))
@@ -1381,32 +1515,38 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
-        let stranger_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        let stranger_id_str: String = sqlx::query_scalar(
+            "INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("stranger@test.com")
         .bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let stranger_id = Uuid::parse_str(&stranger_id_str).unwrap();
         let stranger_token =
             crate::auth::encode_token(stranger_id, false, "access", SECRET, 900).unwrap();
 
-        let server_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("stranger-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("POST")
             .uri(format!("/api/servers/{}/start", server_id))
@@ -1424,21 +1564,24 @@ mod tests {
         let (admin_id, token) = seed_admin(&pool).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
-        let server_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("restart-srv")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
-        let app = router(make_state(pool.clone()));
+        let app = router(make_state(pool.clone()).await);
         let req = Request::builder()
             .method("POST")
             .uri(format!("/api/servers/{}/restart", server_id))
@@ -1449,7 +1592,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
         let status: String = sqlx::query_scalar("SELECT status FROM servers WHERE id = $1")
-            .bind(server_id)
+            .bind(server_id.to_string())
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -1463,32 +1606,38 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let node_id = seed_node(&pool, &node_addr).await;
 
-        let other_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        let other_id_str: String = sqlx::query_scalar(
+            "INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("rother@test.com")
         .bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let other_id = Uuid::parse_str(&other_id_str).unwrap();
         let other_token =
             crate::auth::encode_token(other_id, false, "access", SECRET, 900).unwrap();
 
-        let server_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let server_id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(admin_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(admin_id.to_string())
+        .bind(node_id.to_string())
         .bind("restart-forbidden")
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let server_id = Uuid::parse_str(&server_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("POST")
             .uri(format!("/api/servers/{}/restart", server_id))

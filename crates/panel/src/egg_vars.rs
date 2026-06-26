@@ -1,6 +1,5 @@
 use crate::error::Result;
 use regex::Regex;
-use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -163,14 +162,14 @@ pub fn validate_var(env_variable: &str, value: &str, rules: &str) -> crate::erro
 }
 
 pub async fn load_egg_env(
-    pool: &PgPool,
+    pool: &sqlx::AnyPool,
     egg_id: Uuid,
     user_vars: HashMap<String, String>,
 ) -> Result<Vec<String>> {
     let rows: Vec<(String, Option<String>, Option<String>, bool)> = sqlx::query_as(
         "SELECT env_variable, default_val, rules, user_editable FROM egg_variables WHERE egg_id = $1",
     )
-    .bind(egg_id)
+    .bind(egg_id.to_string())
     .fetch_all(pool)
     .await?;
 

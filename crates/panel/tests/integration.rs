@@ -121,20 +121,28 @@ async fn full_panel_flow(pool: PgPool) {
     let node_addr = start_node("node-secret").await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
+    sqlx::any::install_default_drivers();
+    use sqlx::ConnectOptions;
+    let db_url = pool.connect_options().to_url_lossy().to_string();
+    let any_pool = sqlx::AnyPool::connect(&db_url).await.unwrap();
+
     let state = AppState {
-        db: pool.clone(),
+        db: any_pool,
+        db_backend: "PostgreSQL".to_string(),
         jwt_secret: SECRET.to_string(),
+        app_key: None,
     };
     let app = router(state);
 
     // 1. Create admin user
     let admin_id = Uuid::new_v4();
     let hash = hash_password("admin-pass").unwrap();
-    sqlx::query("INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)")
-        .bind(admin_id)
+    sqlx::query("INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)")
+        .bind(admin_id.to_string())
         .bind("admin@example.com")
         .bind(&hash)
         .bind(true)
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(&pool)
         .await
         .unwrap();
