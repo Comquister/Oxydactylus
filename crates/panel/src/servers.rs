@@ -97,7 +97,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for NodeRow {
     }
 }
 
-async fn get_node_client(state: &AppState, node_id: Uuid) -> Result<NodeClient> {
+pub(crate) async fn get_node_client(state: &AppState, node_id: Uuid) -> Result<NodeClient> {
     let row = sqlx::query_as::<_, NodeRow>("SELECT grpc_addr, token FROM nodes WHERE id = $1")
         .bind(node_id.to_string())
         .fetch_optional(&state.db)
@@ -115,10 +115,13 @@ async fn fetch_server_ports(state: &AppState, server_id: Uuid) -> Result<Vec<Str
         .bind(server_id.to_string())
         .fetch_all(&state.db)
         .await?;
-    Ok(rows.into_iter().map(|(ip, port)| format!("{}:{}:{}/tcp", ip, port, port)).collect())
+    Ok(rows.into_iter().flat_map(|(ip, port)| [
+        format!("{}:{}:{}/tcp", ip, port, port),
+        format!("{}:{}:{}/udp", ip, port, port),
+    ]).collect())
 }
 
-async fn fetch_server(db: &sqlx::AnyPool, id: Uuid) -> Result<Server> {
+pub(crate) async fn fetch_server(db: &sqlx::AnyPool, id: Uuid) -> Result<Server> {
     sqlx::query_as::<_, Server>(
         "SELECT id, user_id, node_id, allocation_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
          FROM servers WHERE id = $1",
@@ -161,6 +164,17 @@ pub(crate) async fn check_server_access(
         }
     }
     Ok(())
+}
+
+pub(crate) async fn load_server_with_access(
+    state: &AppState,
+    user: &AuthUser,
+    server_id: Uuid,
+    perm: Option<&str>,
+) -> Result<Server> {
+    let server = fetch_server(&state.db, server_id).await?;
+    check_server_access(user, &server, perm, &state.db).await?;
+    Ok(server)
 }
 
 async fn list_servers(State(state): State<AppState>, user: AuthUser) -> Result<Json<Vec<Server>>> {
@@ -522,6 +536,7 @@ pub fn servers_router() -> Router<AppState> {
         .route("/:id/network", get(list_server_network).post(assign_allocation))
         .route("/:id/network/:aid", delete(remove_allocation))
         .route("/:id/network/:aid/make-primary", post(make_allocation_primary))
+        .merge(crate::files::files_router())
 }
 
 #[derive(Debug, Deserialize)]
@@ -663,9 +678,11 @@ mod tests {
     use http_body_util::BodyExt;
     use oxy_core::proto::node::{
         node_service_server::{NodeService, NodeServiceServer},
-        LogLine, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest,
+        CreateDirectoryRequest, DeleteFilesRequest, DownloadFileRequest, FileChunk,
+        GetFileContentsRequest, GetFileContentsReply, ListFilesReply, ListFilesRequest,
+        LogLine, RenameFileRequest, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest,
         ServerProvisionRequest, ServerReply, ServerStartRequest, ServerStats, ServerStatsRequest,
-        ServerStopRequest,
+        ServerStopRequest, WriteFileContentsRequest,
     };
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
     use tonic::{async_trait, Request as GrpcRequest, Response, Status};
@@ -710,6 +727,8 @@ mod tests {
     #[async_trait]
     impl NodeService for AcceptAllNode {
         type StreamLogsStream = ReceiverStream<std::result::Result<LogLine, Status>>;
+        type DownloadFileStream = ReceiverStream<std::result::Result<FileChunk, Status>>;
+
         async fn provision_server(
             &self,
             _: GrpcRequest<ServerProvisionRequest>,
@@ -773,6 +792,70 @@ mod tests {
         ) -> std::result::Result<Response<Self::StreamLogsStream>, Status> {
             let (_, rx) = tokio::sync::mpsc::channel(1);
             Ok(Response::new(ReceiverStream::new(rx)))
+        }
+        async fn list_files(
+            &self,
+            _: GrpcRequest<ListFilesRequest>,
+        ) -> std::result::Result<Response<ListFilesReply>, Status> {
+            Ok(Response::new(ListFilesReply { files: vec![] }))
+        }
+        async fn get_file_contents(
+            &self,
+            _: GrpcRequest<GetFileContentsRequest>,
+        ) -> std::result::Result<Response<GetFileContentsReply>, Status> {
+            Ok(Response::new(GetFileContentsReply { content: vec![] }))
+        }
+        async fn write_file_contents(
+            &self,
+            _: GrpcRequest<WriteFileContentsRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn create_directory(
+            &self,
+            _: GrpcRequest<CreateDirectoryRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn delete_files(
+            &self,
+            _: GrpcRequest<DeleteFilesRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn rename_file(
+            &self,
+            _: GrpcRequest<RenameFileRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn download_file(
+            &self,
+            _: GrpcRequest<DownloadFileRequest>,
+        ) -> std::result::Result<Response<Self::DownloadFileStream>, Status> {
+            let (_, rx) = tokio::sync::mpsc::channel(1);
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+        async fn upload_file(
+            &self,
+            _: GrpcRequest<tonic::Streaming<FileChunk>>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
         }
     }
 
@@ -847,6 +930,7 @@ mod tests {
     #[async_trait]
     impl NodeService for LogNode {
         type StreamLogsStream = ReceiverStream<std::result::Result<LogLine, Status>>;
+        type DownloadFileStream = ReceiverStream<std::result::Result<FileChunk, Status>>;
 
         async fn provision_server(
             &self,
@@ -928,6 +1012,70 @@ mod tests {
             });
             Ok(Response::new(ReceiverStream::new(rx)))
         }
+        async fn list_files(
+            &self,
+            _: GrpcRequest<ListFilesRequest>,
+        ) -> std::result::Result<Response<ListFilesReply>, Status> {
+            Ok(Response::new(ListFilesReply { files: vec![] }))
+        }
+        async fn get_file_contents(
+            &self,
+            _: GrpcRequest<GetFileContentsRequest>,
+        ) -> std::result::Result<Response<GetFileContentsReply>, Status> {
+            Ok(Response::new(GetFileContentsReply { content: vec![] }))
+        }
+        async fn write_file_contents(
+            &self,
+            _: GrpcRequest<WriteFileContentsRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn create_directory(
+            &self,
+            _: GrpcRequest<CreateDirectoryRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn delete_files(
+            &self,
+            _: GrpcRequest<DeleteFilesRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn rename_file(
+            &self,
+            _: GrpcRequest<RenameFileRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn download_file(
+            &self,
+            _: GrpcRequest<DownloadFileRequest>,
+        ) -> std::result::Result<Response<Self::DownloadFileStream>, Status> {
+            let (_, rx) = tokio::sync::mpsc::channel(1);
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+        async fn upload_file(
+            &self,
+            _: GrpcRequest<tonic::Streaming<FileChunk>>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
     }
 
     async fn start_log_node(token: &str) -> String {
@@ -953,6 +1101,8 @@ mod tests {
     #[async_trait]
     impl NodeService for FailStartNode {
         type StreamLogsStream = ReceiverStream<std::result::Result<LogLine, Status>>;
+        type DownloadFileStream = ReceiverStream<std::result::Result<FileChunk, Status>>;
+
         async fn provision_server(
             &self,
             _: GrpcRequest<ServerProvisionRequest>,
@@ -1007,6 +1157,70 @@ mod tests {
         ) -> std::result::Result<Response<Self::StreamLogsStream>, Status> {
             let (_, rx) = tokio::sync::mpsc::channel(1);
             Ok(Response::new(ReceiverStream::new(rx)))
+        }
+        async fn list_files(
+            &self,
+            _: GrpcRequest<ListFilesRequest>,
+        ) -> std::result::Result<Response<ListFilesReply>, Status> {
+            Ok(Response::new(ListFilesReply { files: vec![] }))
+        }
+        async fn get_file_contents(
+            &self,
+            _: GrpcRequest<GetFileContentsRequest>,
+        ) -> std::result::Result<Response<GetFileContentsReply>, Status> {
+            Ok(Response::new(GetFileContentsReply { content: vec![] }))
+        }
+        async fn write_file_contents(
+            &self,
+            _: GrpcRequest<WriteFileContentsRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn create_directory(
+            &self,
+            _: GrpcRequest<CreateDirectoryRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn delete_files(
+            &self,
+            _: GrpcRequest<DeleteFilesRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn rename_file(
+            &self,
+            _: GrpcRequest<RenameFileRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn download_file(
+            &self,
+            _: GrpcRequest<DownloadFileRequest>,
+        ) -> std::result::Result<Response<Self::DownloadFileStream>, Status> {
+            let (_, rx) = tokio::sync::mpsc::channel(1);
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+        async fn upload_file(
+            &self,
+            _: GrpcRequest<tonic::Streaming<FileChunk>>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
         }
     }
 

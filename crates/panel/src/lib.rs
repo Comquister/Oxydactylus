@@ -4,6 +4,7 @@ mod db;
 pub mod egg_vars;
 mod eggs;
 pub mod error;
+mod files;
 pub mod node_client;
 mod nodes;
 pub mod permissions;
