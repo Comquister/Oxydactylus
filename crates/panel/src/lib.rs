@@ -1,3 +1,4 @@
+pub mod allocations;
 pub mod auth;
 mod db;
 pub mod egg_vars;
@@ -60,7 +61,7 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/me", get(users::me))
         .nest("/auth", auth::auth_router())
         .nest("/api/users", users::users_router())
-        .nest("/api/nodes", nodes::nodes_router())
+        .nest("/api/nodes", nodes::nodes_router().merge(allocations::router()))
         .nest("/api/servers", servers::servers_router())
         .nest("/api/eggs", eggs::eggs_router())
         .with_state(state)
