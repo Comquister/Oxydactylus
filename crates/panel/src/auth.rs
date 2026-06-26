@@ -103,8 +103,13 @@ impl FromRequestParts<AppState> for AuthUser {
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
+            .or_else(|| {
+                parts.uri.query().and_then(|q| {
+                    q.split('&').find_map(|kv| kv.strip_prefix("token="))
+                })
+            })
             .ok_or_else(|| {
-                PanelError::Unauthorized("missing Authorization header".to_string()).into_response()
+                PanelError::Unauthorized("missing token".to_string()).into_response()
             })?;
         let claims = decode_token(token, &state.jwt_secret, "access")
             .map_err(IntoResponse::into_response)?;
@@ -332,5 +337,33 @@ mod tests {
 
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn auth_via_query_token_param(pool: sqlx::PgPool) {
+        let state = make_state(pool.clone()).await;
+        let hash = hash_password("pass").unwrap();
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, is_admin) VALUES ($1,$2,$3) RETURNING id",
+        )
+        .bind("q@example.com")
+        .bind(&hash)
+        .bind(false)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let token = encode_token(user_id, false, "access", SECRET, 900).unwrap();
+
+        // GET /api/me com token na query string
+        let app = crate::router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/me?token={}", token))
+            .body(Body::empty())
+            .unwrap();
+
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
     }
 }
