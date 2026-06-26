@@ -503,7 +503,7 @@ async fn assign_allocation(
     let server = fetch_server(&state.db, id).await?;
     check_server_access(&user, &server, Some("network.update"), &state.db).await?;
 
-    // Verificar se o limite de alocações foi atingido
+
     let count_sql = crate::db::port_sql("SELECT COUNT(*) FROM allocations WHERE server_id = $1", &state.db_backend);
     let count: i64 = sqlx::query_scalar(&count_sql)
         .bind(server.id.to_string())
@@ -514,7 +514,7 @@ async fn assign_allocation(
         return Err(PanelError::Validation("allocation limit reached for this server".to_string()));
     }
 
-    // Verificar se a alocação existe no mesmo node, e está livre
+
     let alloc_sql = crate::db::port_sql("SELECT node_id, server_id FROM allocations WHERE id = $1", &state.db_backend);
     let alloc_info: Option<(String, Option<String>)> = sqlx::query_as(&alloc_sql)
         .bind(body.allocation_id.to_string())
@@ -529,7 +529,7 @@ async fn assign_allocation(
         return Err(PanelError::Validation("allocation is already assigned to a server".to_string()));
     }
 
-    // Atribuir
+
     let assign_sql = crate::db::port_sql("UPDATE allocations SET server_id = $1 WHERE id = $2", &state.db_backend);
     sqlx::query(&assign_sql)
         .bind(server.id.to_string())
@@ -575,7 +575,7 @@ async fn make_allocation_primary(
     let server = fetch_server(&state.db, id).await?;
     check_server_access(&user, &server, Some("network.update"), &state.db).await?;
 
-    // Validar que a alocação de fato pertence a esse servidor
+
     let verify_sql = crate::db::port_sql("SELECT server_id FROM allocations WHERE id = $1", &state.db_backend);
     let assigned_server: Option<Option<String>> = sqlx::query_scalar(&verify_sql)
         .bind(allocation_id.to_string())
@@ -587,7 +587,7 @@ async fn make_allocation_primary(
         _ => return Err(PanelError::Validation("allocation does not belong to this server".to_string())),
     }
 
-    // Atualizar no servidor
+
     let update_sql = crate::db::port_sql("UPDATE servers SET allocation_id = $1 WHERE id = $2", &state.db_backend);
     sqlx::query(&update_sql)
         .bind(allocation_id.to_string())
@@ -741,6 +741,39 @@ mod tests {
                 .unwrap();
         });
         format!("http://127.0.0.1:{}", port)
+    }
+
+    async fn seed_admin_any(pool: &sqlx::AnyPool) -> (Uuid, String) {
+        let id = Uuid::new_v4();
+        let hash = hash_password("pass").unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id.to_string())
+        .bind(format!("admin-net-{}@t.com", id))
+        .bind(&hash)
+        .bind(true)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(pool)
+        .await
+        .unwrap();
+        let token = encode_token(id, true, "access", SECRET, 900).unwrap();
+        (id, token)
+    }
+
+    async fn seed_node_any(pool: &sqlx::AnyPool, grpc_addr: &str) -> Uuid {
+        let id_str: String = sqlx::query_scalar(
+            "INSERT INTO nodes (id, name, grpc_addr, token, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind("test-node")
+        .bind(grpc_addr)
+        .bind("node-token")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        Uuid::parse_str(&id_str).unwrap()
     }
 
     async fn seed_node(pool: &sqlx::PgPool, grpc_addr: &str) -> Uuid {
@@ -1778,7 +1811,7 @@ mod tests {
 
     // ── helpers shared by network tests ─────────────────────────────────────
 
-    async fn seed_allocation(pool: &sqlx::PgPool, node_id: Uuid, port: i32) -> Uuid {
+    async fn seed_allocation(pool: &sqlx::AnyPool, node_id: Uuid, port: i32) -> Uuid {
         let alloc_id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO allocations (id, node_id, ip, port, created_at) VALUES ($1,$2,$3,$4,$5)",
@@ -1795,7 +1828,7 @@ mod tests {
     }
 
     async fn seed_server_with_alloc(
-        pool: &sqlx::PgPool,
+        pool: &sqlx::AnyPool,
         user_id: Uuid,
         node_id: Uuid,
         name: &str,
@@ -1826,24 +1859,27 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn list_server_network_returns_assigned_allocations(pool: sqlx::PgPool) {
-        let (admin_id, token) = seed_admin(&pool).await;
+        sqlx::any::install_default_drivers();
+        let state = make_state(pool).await;
+        let any_pool = state.db.clone();
+        let (admin_id, token) = seed_admin_any(&any_pool).await;
         let node_addr = start_mock_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let node_id = seed_node(&pool, &node_addr).await;
+        let node_id = seed_node_any(&any_pool, &node_addr).await;
 
-        let alloc_id = seed_allocation(&pool, node_id, 25565).await;
+        let alloc_id = seed_allocation(&any_pool, node_id, 25565).await;
         let server_id =
-            seed_server_with_alloc(&pool, admin_id, node_id, "net-list-srv", None).await;
+            seed_server_with_alloc(&any_pool, admin_id, node_id, "net-list-srv", None).await;
 
         // Assign allocation to server directly
         sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
             .bind(server_id.to_string())
             .bind(alloc_id.to_string())
-            .execute(&pool)
+            .execute(&any_pool)
             .await
             .unwrap();
 
-        let app = router(make_state(pool).await);
+        let app = router(state);
         let req = Request::builder()
             .method("GET")
             .uri(format!("/api/servers/{}/network", server_id))
@@ -1860,16 +1896,19 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn assign_allocation_success(pool: sqlx::PgPool) {
-        let (admin_id, token) = seed_admin(&pool).await;
+        sqlx::any::install_default_drivers();
+        let state = make_state(pool).await;
+        let any_pool = state.db.clone();
+        let (admin_id, token) = seed_admin_any(&any_pool).await;
         let node_addr = start_mock_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let node_id = seed_node(&pool, &node_addr).await;
+        let node_id = seed_node_any(&any_pool, &node_addr).await;
 
-        let alloc_id = seed_allocation(&pool, node_id, 25566).await;
+        let alloc_id = seed_allocation(&any_pool, node_id, 25566).await;
         let server_id =
-            seed_server_with_alloc(&pool, admin_id, node_id, "net-assign-srv", None).await;
+            seed_server_with_alloc(&any_pool, admin_id, node_id, "net-assign-srv", None).await;
 
-        let app = router(make_state(pool.clone()).await);
+        let app = router(state);
         let body = serde_json::json!({ "allocation_id": alloc_id });
         let req = Request::builder()
             .method("POST")
@@ -1884,7 +1923,7 @@ mod tests {
         let srv_id_in_alloc: Option<String> =
             sqlx::query_scalar("SELECT server_id FROM allocations WHERE id = $1")
                 .bind(alloc_id.to_string())
-                .fetch_one(&pool)
+                .fetch_one(&any_pool)
                 .await
                 .unwrap();
         assert_eq!(
@@ -1896,26 +1935,29 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn assign_allocation_already_in_use_returns_422(pool: sqlx::PgPool) {
-        let (admin_id, token) = seed_admin(&pool).await;
+        sqlx::any::install_default_drivers();
+        let state = make_state(pool).await;
+        let any_pool = state.db.clone();
+        let (admin_id, token) = seed_admin_any(&any_pool).await;
         let node_addr = start_mock_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let node_id = seed_node(&pool, &node_addr).await;
+        let node_id = seed_node_any(&any_pool, &node_addr).await;
 
-        let alloc_id = seed_allocation(&pool, node_id, 25567).await;
+        let alloc_id = seed_allocation(&any_pool, node_id, 25567).await;
         let other_srv_id =
-            seed_server_with_alloc(&pool, admin_id, node_id, "net-other-srv", None).await;
+            seed_server_with_alloc(&any_pool, admin_id, node_id, "net-other-srv", None).await;
         let server_id =
-            seed_server_with_alloc(&pool, admin_id, node_id, "net-assign2-srv", None).await;
+            seed_server_with_alloc(&any_pool, admin_id, node_id, "net-assign2-srv", None).await;
 
         // assign to other_srv first
         sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
             .bind(other_srv_id.to_string())
             .bind(alloc_id.to_string())
-            .execute(&pool)
+            .execute(&any_pool)
             .await
             .unwrap();
 
-        let app = router(make_state(pool).await);
+        let app = router(state);
         let body = serde_json::json!({ "allocation_id": alloc_id });
         let req = Request::builder()
             .method("POST")
@@ -1930,32 +1972,35 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn remove_allocation_success(pool: sqlx::PgPool) {
-        let (admin_id, token) = seed_admin(&pool).await;
+        sqlx::any::install_default_drivers();
+        let state = make_state(pool).await;
+        let any_pool = state.db.clone();
+        let (admin_id, token) = seed_admin_any(&any_pool).await;
         let node_addr = start_mock_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let node_id = seed_node(&pool, &node_addr).await;
+        let node_id = seed_node_any(&any_pool, &node_addr).await;
 
-        let alloc_id = seed_allocation(&pool, node_id, 25568).await;
+        let alloc_id = seed_allocation(&any_pool, node_id, 25568).await;
         // Use a different secondary alloc as primary so we can remove alloc_id
-        let primary_alloc_id = seed_allocation(&pool, node_id, 25569).await;
+        let primary_alloc_id = seed_allocation(&any_pool, node_id, 25569).await;
         let server_id =
-            seed_server_with_alloc(&pool, admin_id, node_id, "net-rm-srv", Some(primary_alloc_id)).await;
+            seed_server_with_alloc(&any_pool, admin_id, node_id, "net-rm-srv", Some(primary_alloc_id)).await;
 
         // assign secondary allocation to server
         sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
             .bind(server_id.to_string())
             .bind(alloc_id.to_string())
-            .execute(&pool)
+            .execute(&any_pool)
             .await
             .unwrap();
         sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
             .bind(server_id.to_string())
             .bind(primary_alloc_id.to_string())
-            .execute(&pool)
+            .execute(&any_pool)
             .await
             .unwrap();
 
-        let app = router(make_state(pool.clone()).await);
+        let app = router(state);
         let req = Request::builder()
             .method("DELETE")
             .uri(format!("/api/servers/{}/network/{}", server_id, alloc_id))
@@ -1968,7 +2013,7 @@ mod tests {
         let srv_id_in_alloc: Option<String> =
             sqlx::query_scalar("SELECT server_id FROM allocations WHERE id = $1")
                 .bind(alloc_id.to_string())
-                .fetch_one(&pool)
+                .fetch_one(&any_pool)
                 .await
                 .unwrap();
         assert!(
@@ -1979,23 +2024,26 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn remove_primary_allocation_returns_422(pool: sqlx::PgPool) {
-        let (admin_id, token) = seed_admin(&pool).await;
+        sqlx::any::install_default_drivers();
+        let state = make_state(pool).await;
+        let any_pool = state.db.clone();
+        let (admin_id, token) = seed_admin_any(&any_pool).await;
         let node_addr = start_mock_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let node_id = seed_node(&pool, &node_addr).await;
+        let node_id = seed_node_any(&any_pool, &node_addr).await;
 
-        let alloc_id = seed_allocation(&pool, node_id, 25570).await;
+        let alloc_id = seed_allocation(&any_pool, node_id, 25570).await;
         let server_id =
-            seed_server_with_alloc(&pool, admin_id, node_id, "net-primary-rm-srv", Some(alloc_id)).await;
+            seed_server_with_alloc(&any_pool, admin_id, node_id, "net-primary-rm-srv", Some(alloc_id)).await;
 
         sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
             .bind(server_id.to_string())
             .bind(alloc_id.to_string())
-            .execute(&pool)
+            .execute(&any_pool)
             .await
             .unwrap();
 
-        let app = router(make_state(pool).await);
+        let app = router(state);
         let req = Request::builder()
             .method("DELETE")
             .uri(format!("/api/servers/{}/network/{}", server_id, alloc_id))
@@ -2008,15 +2056,18 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn make_allocation_primary_success(pool: sqlx::PgPool) {
-        let (admin_id, token) = seed_admin(&pool).await;
+        sqlx::any::install_default_drivers();
+        let state = make_state(pool).await;
+        let any_pool = state.db.clone();
+        let (admin_id, token) = seed_admin_any(&any_pool).await;
         let node_addr = start_mock_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let node_id = seed_node(&pool, &node_addr).await;
+        let node_id = seed_node_any(&any_pool, &node_addr).await;
 
-        let primary_alloc_id = seed_allocation(&pool, node_id, 25571).await;
-        let new_primary_id = seed_allocation(&pool, node_id, 25572).await;
+        let primary_alloc_id = seed_allocation(&any_pool, node_id, 25571).await;
+        let new_primary_id = seed_allocation(&any_pool, node_id, 25572).await;
         let server_id = seed_server_with_alloc(
-            &pool,
+            &any_pool,
             admin_id,
             node_id,
             "net-mkprimary-srv",
@@ -2028,17 +2079,17 @@ mod tests {
         sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
             .bind(server_id.to_string())
             .bind(primary_alloc_id.to_string())
-            .execute(&pool)
+            .execute(&any_pool)
             .await
             .unwrap();
         sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
             .bind(server_id.to_string())
             .bind(new_primary_id.to_string())
-            .execute(&pool)
+            .execute(&any_pool)
             .await
             .unwrap();
 
-        let app = router(make_state(pool.clone()).await);
+        let app = router(state);
         let req = Request::builder()
             .method("POST")
             .uri(format!(
@@ -2054,7 +2105,7 @@ mod tests {
         let alloc_id_in_srv: Option<String> =
             sqlx::query_scalar("SELECT allocation_id FROM servers WHERE id = $1")
                 .bind(server_id.to_string())
-                .fetch_one(&pool)
+                .fetch_one(&any_pool)
                 .await
                 .unwrap();
         assert_eq!(
@@ -2066,25 +2117,28 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn make_allocation_primary_wrong_server_returns_422(pool: sqlx::PgPool) {
-        let (admin_id, token) = seed_admin(&pool).await;
+        sqlx::any::install_default_drivers();
+        let state = make_state(pool).await;
+        let any_pool = state.db.clone();
+        let (admin_id, token) = seed_admin_any(&any_pool).await;
         let node_addr = start_mock_node("node-token").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let node_id = seed_node(&pool, &node_addr).await;
+        let node_id = seed_node_any(&any_pool, &node_addr).await;
 
-        let alloc_id = seed_allocation(&pool, node_id, 25573).await;
-        let other_srv = seed_server_with_alloc(&pool, admin_id, node_id, "net-other2", None).await;
+        let alloc_id = seed_allocation(&any_pool, node_id, 25573).await;
+        let other_srv = seed_server_with_alloc(&any_pool, admin_id, node_id, "net-other2", None).await;
         let server_id =
-            seed_server_with_alloc(&pool, admin_id, node_id, "net-mkprimary2-srv", None).await;
+            seed_server_with_alloc(&any_pool, admin_id, node_id, "net-mkprimary2-srv", None).await;
 
         // assign alloc to OTHER server, not our server
         sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
             .bind(other_srv.to_string())
             .bind(alloc_id.to_string())
-            .execute(&pool)
+            .execute(&any_pool)
             .await
             .unwrap();
 
-        let app = router(make_state(pool).await);
+        let app = router(state);
         let req = Request::builder()
             .method("POST")
             .uri(format!(
