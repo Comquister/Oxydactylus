@@ -5,9 +5,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use oxy_core::proto::node::{
     node_service_server::NodeService,
-    LogLine, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest,
-    ServerProvisionRequest, ServerReply, ServerStartRequest, ServerStats,
-    ServerStatsRequest, ServerStopRequest,
+    CreateDirectoryRequest, DeleteFilesRequest, DownloadFileRequest, FileChunk,
+    FileInfo, GetFileContentsReply, GetFileContentsRequest, ListFilesReply,
+    ListFilesRequest, LogLine, RenameFileRequest, ServerCommandRequest,
+    ServerDeleteRequest, ServerLogsRequest, ServerProvisionRequest, ServerReply,
+    ServerStartRequest, ServerStats, ServerStatsRequest, ServerStopRequest,
+    WriteFileContentsRequest,
 };
 use crate::docker::DockerBackend;
 use crate::stream::forward_logs;
@@ -29,6 +32,7 @@ impl<B: DockerBackend> NodeServiceImpl<B> {
 #[async_trait]
 impl<B: DockerBackend> NodeService for NodeServiceImpl<B> {
     type StreamLogsStream = ReceiverStream<Result<LogLine, Status>>;
+    type DownloadFileStream = ReceiverStream<Result<FileChunk, Status>>;
 
     async fn start_server(
         &self,
@@ -131,6 +135,188 @@ impl<B: DockerBackend> NodeService for NodeServiceImpl<B> {
             .await
             .map_err(Status::from)?;
         Ok(Self::ok(format!("provisioned {}", r.server_id)))
+    }
+
+    async fn list_files(
+        &self,
+        req: Request<ListFilesRequest>,
+    ) -> Result<Response<ListFilesReply>, Status> {
+        let r = req.into_inner();
+        let entries = crate::files::list_files(Arc::clone(&self.docker), r.server_id, r.path)
+            .await
+            .map_err(Status::from)?;
+
+        let files = entries
+            .into_iter()
+            .map(|e| FileInfo {
+                name:       e.name,
+                path:       e.path,
+                is_dir:     e.is_dir,
+                size_bytes: e.size_bytes,
+                mode:       e.mode,
+            })
+            .collect();
+
+        Ok(Response::new(ListFilesReply { files }))
+    }
+
+    async fn get_file_contents(
+        &self,
+        req: Request<GetFileContentsRequest>,
+    ) -> Result<Response<GetFileContentsReply>, Status> {
+        let r = req.into_inner();
+        let content =
+            crate::files::get_file_contents(Arc::clone(&self.docker), r.server_id, r.path)
+                .await
+                .map_err(Status::from)?;
+
+        Ok(Response::new(GetFileContentsReply { content }))
+    }
+
+    async fn write_file_contents(
+        &self,
+        req: Request<WriteFileContentsRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        crate::files::write_file_contents(
+            Arc::clone(&self.docker),
+            r.server_id.clone(),
+            r.path,
+            r.content,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Self::ok(format!("wrote file to {}", r.server_id)))
+    }
+
+    async fn create_directory(
+        &self,
+        req: Request<CreateDirectoryRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        crate::files::create_directory(
+            Arc::clone(&self.docker),
+            r.server_id.clone(),
+            r.path,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Self::ok(format!("created directory on {}", r.server_id)))
+    }
+
+    async fn delete_files(
+        &self,
+        req: Request<DeleteFilesRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        crate::files::delete_files(
+            Arc::clone(&self.docker),
+            r.server_id.clone(),
+            r.path,
+            r.recursive,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Self::ok(format!("deleted files on {}", r.server_id)))
+    }
+
+    async fn rename_file(
+        &self,
+        req: Request<RenameFileRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        crate::files::rename_file(
+            Arc::clone(&self.docker),
+            r.server_id.clone(),
+            r.old_path,
+            r.new_path,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Self::ok(format!("renamed file on {}", r.server_id)))
+    }
+
+    async fn download_file(
+        &self,
+        req: Request<DownloadFileRequest>,
+    ) -> Result<Response<Self::DownloadFileStream>, Status> {
+        let r = req.into_inner();
+        let chunk_size = if r.chunk_size == 0 { 8192 } else { r.chunk_size as u64 };
+        let (tx, rx) = mpsc::channel(32);
+
+        let docker = Arc::clone(&self.docker);
+        let server_id = r.server_id.clone();
+        let path = r.path.clone();
+
+        tokio::spawn(async move {
+            let mut offset = 0u64;
+            loop {
+                match crate::files::download_file_chunk(
+                    Arc::clone(&docker),
+                    server_id.clone(),
+                    path.clone(),
+                    offset,
+                    chunk_size,
+                )
+                .await
+                {
+                    Ok(chunk) => {
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        let result = tx
+                            .send(Ok(FileChunk {
+                                server_id: server_id.clone(),
+                                path: path.clone(),
+                                chunk: chunk.clone(),
+                            }))
+                            .await;
+                        if result.is_err() {
+                            break;
+                        }
+                        offset += chunk.len() as u64;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(Status::from(e))).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn upload_file(
+        &self,
+        req: Request<tonic::Streaming<FileChunk>>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let mut stream = req.into_inner();
+        let mut server_id = String::new();
+        let mut first = true;
+
+        while let Some(chunk_result) = stream.message().await? {
+            if first {
+                server_id = chunk_result.server_id.clone();
+                first = false;
+            }
+
+            crate::files::upload_file_chunk(
+                Arc::clone(&self.docker),
+                chunk_result.server_id,
+                chunk_result.path,
+                chunk_result.chunk,
+                !first,
+            )
+            .await
+            .map_err(Status::from)?;
+        }
+
+        Ok(Self::ok(format!("uploaded file to {}", server_id)))
     }
 }
 
