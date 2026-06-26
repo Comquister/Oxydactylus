@@ -139,11 +139,14 @@ pub async fn delete_subuser(
     Path((server_id, subuser_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode> {
     check_access(&user, server_id, USER_DELETE, &state.db).await?;
-    sqlx::query("DELETE FROM server_subusers WHERE id = $1 AND server_id = $2")
+    let res = sqlx::query("DELETE FROM server_subusers WHERE id = $1 AND server_id = $2")
         .bind(subuser_id)
         .bind(server_id)
         .execute(&state.db)
         .await?;
+    if res.rows_affected() == 0 {
+        return Err(PanelError::NotFound(format!("subuser {}", subuser_id)));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -459,6 +462,23 @@ mod tests {
             .body(Body::empty()).unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn delete_non_existent_subuser_returns_404(pool: sqlx::PgPool) {
+        let (admin_id, admin_token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool).await;
+        let server_id = seed_server(&pool, admin_id, node_id, "del-nonexist-srv").await;
+        let random_subuser_id = Uuid::new_v4();
+
+        let app = router(make_state(pool));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/servers/{}/subusers/{}", server_id, random_subuser_id))
+            .header("authorization", format!("Bearer {}", admin_token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }
 
