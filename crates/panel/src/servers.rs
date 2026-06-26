@@ -15,7 +15,7 @@ use crate::{
     auth::{AdminUser, AuthUser},
     error::{PanelError, Result},
     node_client::NodeClient,
-    permissions::{CONTROL_CONSOLE, CONTROL_START, CONTROL_STOP},
+    permissions::{CONTROL_CONSOLE, CONTROL_RESTART, CONTROL_START, CONTROL_STOP},
     AppState,
 };
 
@@ -269,6 +269,31 @@ async fn stop_server(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn restart_server(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode> {
+    let server = fetch_server(&state.db, id).await?;
+    check_server_access(&user, &server, Some(CONTROL_RESTART), &state.db).await?;
+    let mut client = get_node_client(&state, server.node_id).await?;
+    // stop best-effort — ignora se já estiver parado
+    let _ = client.stop(&server.id.to_string(), 10).await;
+    match client.start(&server.id.to_string()).await {
+        Ok(_) => {
+            sqlx::query("UPDATE servers SET status = 'running' WHERE id = $1")
+                .bind(server.id).execute(&state.db).await?;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(e) => {
+            let _ = sqlx::query("UPDATE servers SET status = 'error' WHERE id = $1")
+                .bind(server.id).execute(&state.db).await;
+            Err(e)
+        }
+    }
+}
+
+
 async fn provision_server(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -351,6 +376,7 @@ pub fn servers_router() -> Router<AppState> {
         .route("/:id",           get(get_server).delete(delete_server))
         .route("/:id/start",     post(start_server))
         .route("/:id/stop",      post(stop_server))
+        .route("/:id/restart",   post(restart_server))
         .route("/:id/provision", post(provision_server))
         .route("/:id/command",   post(server_command))
         .route("/:id/stats",     get(server_stats))
@@ -1069,6 +1095,63 @@ mod tests {
         let req = Request::builder()
             .method("POST").uri(format!("/api/servers/{}/start", server_id))
             .header("authorization", format!("Bearer {}", stranger_token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn restart_server_transitions_to_running(pool: sqlx::PgPool) {
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (admin_id, token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let server_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        )
+        .bind(admin_id).bind(node_id).bind("restart-srv").bind("ubuntu").bind(512).bind(50)
+        .fetch_one(&pool).await.unwrap();
+
+        let app = router(make_state(pool.clone()));
+        let req = Request::builder()
+            .method("POST").uri(format!("/api/servers/{}/restart", server_id))
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let status: String = sqlx::query_scalar("SELECT status FROM servers WHERE id = $1")
+            .bind(server_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(status, "running");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn restart_forbidden_for_non_owner(pool: sqlx::PgPool) {
+        let (admin_id, _) = seed_admin(&pool).await;
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let other_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        )
+        .bind("rother@test.com").bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .fetch_one(&pool).await.unwrap();
+        let other_token = crate::auth::encode_token(other_id, false, "access", SECRET, 900).unwrap();
+
+        let server_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        )
+        .bind(admin_id).bind(node_id).bind("restart-forbidden").bind("ubuntu").bind(512).bind(50)
+        .fetch_one(&pool).await.unwrap();
+
+        let app = router(make_state(pool));
+        let req = Request::builder()
+            .method("POST").uri(format!("/api/servers/{}/restart", server_id))
+            .header("authorization", format!("Bearer {}", other_token))
             .body(Body::empty()).unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
