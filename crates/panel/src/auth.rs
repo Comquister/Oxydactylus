@@ -148,11 +148,14 @@ struct LoginRequest {
 struct TokenResponse {
     access_token: String,
     refresh_token: String,
+    email: String,
+    is_admin: bool,
 }
 
 #[derive(sqlx::FromRow)]
 struct UserRow {
     id: Uuid,
+    email: String,
     password_hash: String,
     is_admin: bool,
 }
@@ -162,7 +165,7 @@ async fn login(
     Json(body): Json<LoginRequest>,
 ) -> std::result::Result<Json<TokenResponse>, PanelError> {
     let row: Option<UserRow> = sqlx::query_as::<_, UserRow>(
-        "SELECT id, password_hash, is_admin FROM users WHERE email = $1",
+        "SELECT id, email, password_hash, is_admin FROM users WHERE email = $1",
     )
     .bind(&body.email)
     .fetch_optional(&state.db)
@@ -186,6 +189,8 @@ async fn login(
     Ok(Json(TokenResponse {
         access_token,
         refresh_token,
+        email: row.email,
+        is_admin: row.is_admin,
     }))
 }
 
@@ -300,6 +305,8 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(json["access_token"].is_string());
         assert!(json["refresh_token"].is_string());
+        assert_eq!(json["email"].as_str(), Some("admin@example.com"));
+        assert_eq!(json["is_admin"].as_bool(), Some(true));
     }
 
     #[sqlx::test(migrations = "./migrations")]
