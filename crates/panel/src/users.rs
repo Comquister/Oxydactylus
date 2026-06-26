@@ -31,6 +31,13 @@ struct CreateUserRequest {
     is_admin: bool,
 }
 
+#[derive(Debug, sqlx::FromRow, Serialize)]
+pub struct MeResponse {
+    pub id:       Uuid,
+    pub email:    String,
+    pub is_admin: bool,
+}
+
 async fn list_users(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -102,6 +109,19 @@ async fn delete_user(
         return Err(PanelError::NotFound(id.to_string()));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn me(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<MeResponse>> {
+    let row = sqlx::query_as::<_, MeResponse>(
+        "SELECT id, email, is_admin FROM users WHERE id = $1",
+    )
+    .bind(user.id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(row))
 }
 
 pub fn users_router() -> Router<AppState> {
@@ -197,4 +217,42 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
     }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn me_returns_current_user(pool: sqlx::PgPool) {
+        let id = Uuid::new_v4();
+        let hash = hash_password("admin-pass").unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id).bind("a@t.com").bind(&hash).bind(true)
+        .execute(&pool).await.unwrap();
+        let token = crate::auth::encode_token(
+            id, true, "access", "test-secret-at-least-32-chars-long!!", 900,
+        ).unwrap();
+
+        let app = router(make_state(pool));
+        let req = Request::builder()
+            .method("GET").uri("/api/me")
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let me: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(me["email"], "a@t.com");
+        assert_eq!(me["is_admin"], true);
+        assert!(me["id"].as_str().is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn me_requires_auth(pool: sqlx::PgPool) {
+        let app = router(make_state(pool));
+        let req = Request::builder()
+            .method("GET").uri("/api/me")
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
 }
+

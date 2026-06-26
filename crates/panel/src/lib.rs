@@ -11,6 +11,7 @@ mod eggs;
 
 pub use error::{PanelError, Result};
 
+use axum::routing::get;
 use oxy_core::{OxyError, PanelConfig};
 use sqlx::PgPool;
 
@@ -22,6 +23,7 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> axum::Router {
     axum::Router::new()
+        .route("/api/me", get(users::me))
         .nest("/auth",        auth::auth_router())
         .nest("/api/users",   users::users_router())
         .nest("/api/nodes",   nodes::nodes_router())
