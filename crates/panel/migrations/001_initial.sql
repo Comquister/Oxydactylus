@@ -96,3 +96,87 @@ CREATE TABLE server_subusers (
     created_at  TEXT        NOT NULL,
     UNIQUE (server_id, user_id)
 );
+
+ALTER TABLE nodes ADD COLUMN sftp_port INTEGER NOT NULL DEFAULT 2022;
+
+CREATE TABLE database_hosts (
+    id            TEXT    PRIMARY KEY,
+    node_id       TEXT    REFERENCES nodes(id) ON DELETE SET NULL,
+    name          TEXT    NOT NULL,
+    host          TEXT    NOT NULL,
+    port          INTEGER NOT NULL DEFAULT 3306,
+    username      TEXT    NOT NULL,
+    password      TEXT    NOT NULL,
+    max_databases INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT    NOT NULL
+);
+
+CREATE TABLE server_databases (
+    id            TEXT PRIMARY KEY,
+    server_id     TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    host_id       TEXT NOT NULL REFERENCES database_hosts(id),
+    database_name TEXT NOT NULL,
+    username      TEXT NOT NULL,
+    remote        TEXT NOT NULL DEFAULT '%',
+    password      TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    UNIQUE(host_id, database_name)
+);
+
+CREATE TABLE schedules (
+    id                TEXT    PRIMARY KEY,
+    server_id         TEXT    NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    name              TEXT    NOT NULL,
+    cron_minute       TEXT    NOT NULL DEFAULT '*',
+    cron_hour         TEXT    NOT NULL DEFAULT '*',
+    cron_day_of_month TEXT    NOT NULL DEFAULT '*',
+    cron_month        TEXT    NOT NULL DEFAULT '*',
+    cron_day_of_week  TEXT    NOT NULL DEFAULT '*',
+    is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+    is_processing     BOOLEAN NOT NULL DEFAULT FALSE,
+    only_when_online  BOOLEAN NOT NULL DEFAULT FALSE,
+    last_run_at       TEXT,
+    next_run_at       TEXT,
+    created_at        TEXT    NOT NULL
+);
+
+CREATE TABLE schedule_tasks (
+    id                  TEXT    PRIMARY KEY,
+    schedule_id         TEXT    NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    sequence_id         INTEGER NOT NULL,
+    action              TEXT    NOT NULL,
+    payload             TEXT    NOT NULL,
+    time_offset         INTEGER NOT NULL DEFAULT 0,
+    is_queued           BOOLEAN NOT NULL DEFAULT FALSE,
+    continue_on_failure BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at          TEXT    NOT NULL
+);
+
+CREATE TABLE backups (
+    id           TEXT    PRIMARY KEY,
+    server_id    TEXT    NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    uuid         TEXT    NOT NULL UNIQUE,
+    name         TEXT    NOT NULL,
+    ignored_files TEXT   NOT NULL DEFAULT '[]',
+    driver       TEXT    NOT NULL DEFAULT 'local',
+    sha256_hash  TEXT,
+    bytes        INTEGER NOT NULL DEFAULT 0,
+    is_successful BOOLEAN NOT NULL DEFAULT FALSE,
+    is_locked    BOOLEAN NOT NULL DEFAULT FALSE,
+    completed_at TEXT,
+    created_at   TEXT    NOT NULL
+);
+
+CREATE TABLE activity_logs (
+    id         TEXT PRIMARY KEY,
+    batch_id   TEXT,
+    server_id  TEXT REFERENCES servers(id) ON DELETE CASCADE,
+    user_id    TEXT REFERENCES users(id) ON DELETE SET NULL,
+    event      TEXT NOT NULL,
+    properties TEXT NOT NULL DEFAULT '{}',
+    ip         TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX activity_logs_server_id_idx ON activity_logs(server_id);
+CREATE INDEX activity_logs_event_idx ON activity_logs(event);

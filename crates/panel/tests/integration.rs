@@ -254,3 +254,36 @@ async fn full_panel_flow(pool: PgPool) {
 fn _uses_auth_header() {
     let _ = auth_header(Uuid::new_v4(), true);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn schema_has_new_plan9_tables(pool: PgPool) {
+    let tables = vec![
+        "database_hosts",
+        "server_databases",
+        "schedules",
+        "schedule_tasks",
+        "backups",
+        "activity_logs",
+    ];
+
+    for table in tables {
+        let result: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1"
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .expect(&format!("Failed to query for table {}", table));
+
+        assert_eq!(result.0, 1, "Table {} does not exist", table);
+    }
+
+    let sftp_port_exists: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'nodes' AND column_name = 'sftp_port'"
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("Failed to query for sftp_port column");
+
+    assert_eq!(sftp_port_exists.0, 1, "Column sftp_port does not exist on nodes table");
+}
