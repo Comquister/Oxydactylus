@@ -1,0 +1,20 @@
+[build]
+target = "index.html"
+dist = "dist"
+public_url = "/"
+
+[watch]
+ignore = ["target", "dist"]
+
+[[hooks]]
+stage = "pre_build"
+command = "./node_modules/.bin/tailwindcss"
+command_arguments = ["-i", "./input.css", "-o", "./dist/tailwind.css", "--minify"]
+
+[[proxy]]
+rewrite = "/api"
+backend = "http://localhost:3000/api"
+
+[[proxy]]
+rewrite = "/auth"
+backend = "http://localhost:3000/auth"
