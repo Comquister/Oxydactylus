@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::sse::{Event, Sse},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -468,6 +468,134 @@ pub fn servers_router() -> Router<AppState> {
             "/:id/subusers/:uid",
             axum::routing::patch(subusers::update_subuser).delete(subusers::delete_subuser),
         )
+        .route("/:id/network", get(list_server_network).post(assign_allocation))
+        .route("/:id/network/:aid", delete(remove_allocation))
+        .route("/:id/network/:aid/make-primary", post(make_allocation_primary))
+}
+
+#[derive(Debug, Deserialize)]
+struct AssignAllocationRequest {
+    allocation_id: Uuid,
+}
+
+async fn list_server_network(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::allocations::Allocation>>> {
+    let server = fetch_server(&state.db, id).await?;
+    check_server_access(&user, &server, Some("network.read"), &state.db).await?;
+
+    let sql = crate::db::port_sql("SELECT * FROM allocations WHERE server_id = $1 ORDER BY port ASC", &state.db_backend);
+    let list = sqlx::query_as::<_, crate::allocations::Allocation>(&sql)
+        .bind(server.id.to_string())
+        .fetch_all(&state.db)
+        .await?;
+    Ok(Json(list))
+}
+
+async fn assign_allocation(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<AssignAllocationRequest>,
+) -> Result<StatusCode> {
+    let server = fetch_server(&state.db, id).await?;
+    check_server_access(&user, &server, Some("network.update"), &state.db).await?;
+
+    // Verificar se o limite de alocações foi atingido
+    let count_sql = crate::db::port_sql("SELECT COUNT(*) FROM allocations WHERE server_id = $1", &state.db_backend);
+    let count: i64 = sqlx::query_scalar(&count_sql)
+        .bind(server.id.to_string())
+        .fetch_one(&state.db)
+        .await?;
+
+    if count >= server.allocation_limit as i64 {
+        return Err(PanelError::Validation("allocation limit reached for this server".to_string()));
+    }
+
+    // Verificar se a alocação existe no mesmo node, e está livre
+    let alloc_sql = crate::db::port_sql("SELECT node_id, server_id FROM allocations WHERE id = $1", &state.db_backend);
+    let alloc_info: Option<(String, Option<String>)> = sqlx::query_as(&alloc_sql)
+        .bind(body.allocation_id.to_string())
+        .fetch_optional(&state.db)
+        .await?;
+
+    let (node_id_str, assigned_server_opt) = alloc_info.ok_or_else(|| PanelError::NotFound("allocation not found".to_string()))?;
+    if node_id_str != server.node_id.to_string() {
+        return Err(PanelError::Validation("allocation belongs to a different node".to_string()));
+    }
+    if assigned_server_opt.is_some() {
+        return Err(PanelError::Validation("allocation is already assigned to a server".to_string()));
+    }
+
+    // Atribuir
+    let assign_sql = crate::db::port_sql("UPDATE allocations SET server_id = $1 WHERE id = $2", &state.db_backend);
+    sqlx::query(&assign_sql)
+        .bind(server.id.to_string())
+        .bind(body.allocation_id.to_string())
+        .execute(&state.db)
+        .await?;
+
+    Ok(StatusCode::OK)
+}
+
+async fn remove_allocation(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((id, allocation_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode> {
+    let server = fetch_server(&state.db, id).await?;
+    check_server_access(&user, &server, Some("network.delete"), &state.db).await?;
+
+    if Some(allocation_id) == server.allocation_id {
+        return Err(PanelError::Validation("cannot remove the primary allocation of a server".to_string()));
+    }
+
+    let remove_sql = crate::db::port_sql("UPDATE allocations SET server_id = NULL WHERE id = $1 AND server_id = $2", &state.db_backend);
+    let rows_affected = sqlx::query(&remove_sql)
+        .bind(allocation_id.to_string())
+        .bind(server.id.to_string())
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+
+    if rows_affected == 0 {
+        return Err(PanelError::NotFound("allocation not found on this server".to_string()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn make_allocation_primary(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((id, allocation_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode> {
+    let server = fetch_server(&state.db, id).await?;
+    check_server_access(&user, &server, Some("network.update"), &state.db).await?;
+
+    // Validar que a alocação de fato pertence a esse servidor
+    let verify_sql = crate::db::port_sql("SELECT server_id FROM allocations WHERE id = $1", &state.db_backend);
+    let assigned_server: Option<Option<String>> = sqlx::query_scalar(&verify_sql)
+        .bind(allocation_id.to_string())
+        .fetch_optional(&state.db)
+        .await?;
+
+    match assigned_server {
+        Some(Some(s)) if s == server.id.to_string() => {}
+        _ => return Err(PanelError::Validation("allocation does not belong to this server".to_string())),
+    }
+
+    // Atualizar no servidor
+    let update_sql = crate::db::port_sql("UPDATE servers SET allocation_id = $1 WHERE id = $2", &state.db_backend);
+    sqlx::query(&update_sql)
+        .bind(allocation_id.to_string())
+        .bind(server.id.to_string())
+        .execute(&state.db)
+        .await?;
+
+    Ok(StatusCode::OK)
 }
 
 #[cfg(test)]
@@ -1647,4 +1775,327 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
+
+    // ── helpers shared by network tests ─────────────────────────────────────
+
+    async fn seed_allocation(pool: &sqlx::PgPool, node_id: Uuid, port: i32) -> Uuid {
+        let alloc_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO allocations (id, node_id, ip, port, created_at) VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(alloc_id.to_string())
+        .bind(node_id.to_string())
+        .bind("127.0.0.1")
+        .bind(port)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(pool)
+        .await
+        .unwrap();
+        alloc_id
+    }
+
+    async fn seed_server_with_alloc(
+        pool: &sqlx::PgPool,
+        user_id: Uuid,
+        node_id: Uuid,
+        name: &str,
+        primary_alloc: Option<Uuid>,
+    ) -> Uuid {
+        let server_id = Uuid::new_v4();
+        let alloc_str = primary_alloc.map(|a| a.to_string());
+        sqlx::query(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, allocation_id, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        )
+        .bind(server_id.to_string())
+        .bind(user_id.to_string())
+        .bind(node_id.to_string())
+        .bind(name)
+        .bind("ubuntu")
+        .bind(512)
+        .bind(50)
+        .bind(alloc_str)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(pool)
+        .await
+        .unwrap();
+        server_id
+    }
+
+    // ── network tests ────────────────────────────────────────────────────────
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn list_server_network_returns_assigned_allocations(pool: sqlx::PgPool) {
+        let (admin_id, token) = seed_admin(&pool).await;
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let alloc_id = seed_allocation(&pool, node_id, 25565).await;
+        let server_id =
+            seed_server_with_alloc(&pool, admin_id, node_id, "net-list-srv", None).await;
+
+        // Assign allocation to server directly
+        sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
+            .bind(server_id.to_string())
+            .bind(alloc_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = router(make_state(pool).await);
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/servers/{}/network", server_id))
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["port"], 25565);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn assign_allocation_success(pool: sqlx::PgPool) {
+        let (admin_id, token) = seed_admin(&pool).await;
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let alloc_id = seed_allocation(&pool, node_id, 25566).await;
+        let server_id =
+            seed_server_with_alloc(&pool, admin_id, node_id, "net-assign-srv", None).await;
+
+        let app = router(make_state(pool.clone()).await);
+        let body = serde_json::json!({ "allocation_id": alloc_id });
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/servers/{}/network", server_id))
+            .header("authorization", format!("Bearer {}", token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let srv_id_in_alloc: Option<String> =
+            sqlx::query_scalar("SELECT server_id FROM allocations WHERE id = $1")
+                .bind(alloc_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            srv_id_in_alloc.unwrap(),
+            server_id.to_string(),
+            "allocation should now point to server"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn assign_allocation_already_in_use_returns_422(pool: sqlx::PgPool) {
+        let (admin_id, token) = seed_admin(&pool).await;
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let alloc_id = seed_allocation(&pool, node_id, 25567).await;
+        let other_srv_id =
+            seed_server_with_alloc(&pool, admin_id, node_id, "net-other-srv", None).await;
+        let server_id =
+            seed_server_with_alloc(&pool, admin_id, node_id, "net-assign2-srv", None).await;
+
+        // assign to other_srv first
+        sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
+            .bind(other_srv_id.to_string())
+            .bind(alloc_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = router(make_state(pool).await);
+        let body = serde_json::json!({ "allocation_id": alloc_id });
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/servers/{}/network", server_id))
+            .header("authorization", format!("Bearer {}", token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn remove_allocation_success(pool: sqlx::PgPool) {
+        let (admin_id, token) = seed_admin(&pool).await;
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let alloc_id = seed_allocation(&pool, node_id, 25568).await;
+        // Use a different secondary alloc as primary so we can remove alloc_id
+        let primary_alloc_id = seed_allocation(&pool, node_id, 25569).await;
+        let server_id =
+            seed_server_with_alloc(&pool, admin_id, node_id, "net-rm-srv", Some(primary_alloc_id)).await;
+
+        // assign secondary allocation to server
+        sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
+            .bind(server_id.to_string())
+            .bind(alloc_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
+            .bind(server_id.to_string())
+            .bind(primary_alloc_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = router(make_state(pool.clone()).await);
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/servers/{}/network/{}", server_id, alloc_id))
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let srv_id_in_alloc: Option<String> =
+            sqlx::query_scalar("SELECT server_id FROM allocations WHERE id = $1")
+                .bind(alloc_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            srv_id_in_alloc.is_none(),
+            "allocation should be unassigned after DELETE"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn remove_primary_allocation_returns_422(pool: sqlx::PgPool) {
+        let (admin_id, token) = seed_admin(&pool).await;
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let alloc_id = seed_allocation(&pool, node_id, 25570).await;
+        let server_id =
+            seed_server_with_alloc(&pool, admin_id, node_id, "net-primary-rm-srv", Some(alloc_id)).await;
+
+        sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
+            .bind(server_id.to_string())
+            .bind(alloc_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = router(make_state(pool).await);
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/servers/{}/network/{}", server_id, alloc_id))
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn make_allocation_primary_success(pool: sqlx::PgPool) {
+        let (admin_id, token) = seed_admin(&pool).await;
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let primary_alloc_id = seed_allocation(&pool, node_id, 25571).await;
+        let new_primary_id = seed_allocation(&pool, node_id, 25572).await;
+        let server_id = seed_server_with_alloc(
+            &pool,
+            admin_id,
+            node_id,
+            "net-mkprimary-srv",
+            Some(primary_alloc_id),
+        )
+        .await;
+
+        // assign both allocations to server
+        sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
+            .bind(server_id.to_string())
+            .bind(primary_alloc_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
+            .bind(server_id.to_string())
+            .bind(new_primary_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = router(make_state(pool.clone()).await);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/servers/{}/network/{}/make-primary",
+                server_id, new_primary_id
+            ))
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let alloc_id_in_srv: Option<String> =
+            sqlx::query_scalar("SELECT allocation_id FROM servers WHERE id = $1")
+                .bind(server_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            alloc_id_in_srv.unwrap(),
+            new_primary_id.to_string(),
+            "primary allocation_id should be updated"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn make_allocation_primary_wrong_server_returns_422(pool: sqlx::PgPool) {
+        let (admin_id, token) = seed_admin(&pool).await;
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let alloc_id = seed_allocation(&pool, node_id, 25573).await;
+        let other_srv = seed_server_with_alloc(&pool, admin_id, node_id, "net-other2", None).await;
+        let server_id =
+            seed_server_with_alloc(&pool, admin_id, node_id, "net-mkprimary2-srv", None).await;
+
+        // assign alloc to OTHER server, not our server
+        sqlx::query("UPDATE allocations SET server_id = $1 WHERE id = $2")
+            .bind(other_srv.to_string())
+            .bind(alloc_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = router(make_state(pool).await);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/servers/{}/network/{}/make-primary",
+                server_id, alloc_id
+            ))
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
 }
+
