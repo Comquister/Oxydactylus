@@ -17,7 +17,7 @@ async-trait        = "0.1"
 futures-util       = "0.3"
 tokio-stream       = "0.1"
 axum               = { version = "0.7", features = ["macros"] }
-sqlx               = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono", "migrate"] }
+sqlx               = { version = "0.8", features = ["any", "postgres", "sqlite", "mysql", "runtime-tokio-rustls", "uuid", "chrono", "migrate", "json"] }
 jsonwebtoken       = "9"
 argon2             = { version = "0.5", features = ["std"] }
 chrono             = { version = "0.4", features = ["serde"] }

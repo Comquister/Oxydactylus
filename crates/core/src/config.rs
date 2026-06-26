@@ -19,6 +19,7 @@ pub struct PanelConfig {
     pub http_listen:  String,
     pub database_url: String,
     pub jwt_secret:   String,
+    pub app_key:      Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

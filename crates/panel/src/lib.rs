@@ -20,7 +20,7 @@ use axum::{
 };
 use oxy_core::{OxyError, PanelConfig};
 use rust_embed::RustEmbed;
-use sqlx::PgPool;
+use sqlx::AnyPool;
 
 #[derive(RustEmbed)]
 #[folder = "../frontend/dist/"]
@@ -49,8 +49,10 @@ async fn frontend_handler(uri: Uri) -> Response {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: PgPool,
+    pub db: sqlx::AnyPool,
+    pub db_backend: String,
     pub jwt_secret: String,
+    pub app_key: Option<String>,
 }
 
 pub fn router(state: AppState) -> axum::Router {
@@ -65,6 +67,16 @@ pub fn router(state: AppState) -> axum::Router {
 }
 
 pub async fn run(config: PanelConfig) -> oxy_core::Result<()> {
+    sqlx::any::install_default_drivers();
+
+    let backend = if config.database_url.starts_with("mysql:") {
+        "MySQL".to_string()
+    } else if config.database_url.starts_with("sqlite:") {
+        "SQLite".to_string()
+    } else {
+        "PostgreSQL".to_string()
+    };
+
     let pool = db::create_pool(&config.database_url)
         .await
         .map_err(|e| OxyError::Config(e.to_string()))?;
@@ -73,7 +85,9 @@ pub async fn run(config: PanelConfig) -> oxy_core::Result<()> {
         .map_err(|e| OxyError::Config(e.to_string()))?;
     let state = AppState {
         db: pool,
+        db_backend: backend,
         jwt_secret: config.jwt_secret,
+        app_key: config.app_key,
     };
     tracing::info!(listen = %config.http_listen, "panel starting");
     let listener = tokio::net::TcpListener::bind(&config.http_listen)
