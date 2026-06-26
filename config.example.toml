@@ -44,7 +44,6 @@ type = "both"
 http_listen  = "0.0.0.0:3000"
 database_url = "postgres://oxy:oxy@localhost/oxy"
 jwt_secret   = "change-me-to-a-random-64-char-secret"
-# public_dir = "crates/frontend/dist"  # serve frontend on the same port
 
 [node]
 grpc_listen = "0.0.0.0:8080"

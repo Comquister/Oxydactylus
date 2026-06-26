@@ -12,10 +12,40 @@ mod users;
 
 pub use error::{PanelError, Result};
 
-use axum::routing::get;
+use axum::{
+    body::Body,
+    http::{header, Uri},
+    response::Response,
+    routing::get,
+};
 use oxy_core::{OxyError, PanelConfig};
+use rust_embed::RustEmbed;
 use sqlx::PgPool;
-use tower_http::services::{ServeDir, ServeFile};
+
+#[derive(RustEmbed)]
+#[folder = "../frontend/dist/"]
+struct FrontendAssets;
+
+async fn frontend_handler(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    match FrontendAssets::get(path) {
+        Some(content) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            Response::builder()
+                .header(header::CONTENT_TYPE, mime.as_ref())
+                .body(Body::from(content.data))
+                .unwrap()
+        }
+        None => {
+            let index = FrontendAssets::get("index.html").unwrap();
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/html")
+                .body(Body::from(index.data))
+                .unwrap()
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -49,15 +79,7 @@ pub async fn run(config: PanelConfig) -> oxy_core::Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.http_listen)
         .await
         .map_err(OxyError::Io)?;
-    let app = match config.public_dir {
-        Some(dir) => {
-            let spa = ServeDir::new(&dir)
-                .not_found_service(ServeFile::new(format!("{}/index.html", dir)));
-            router(state).fallback_service(spa)
-        }
-        None => router(state),
-    };
-    axum::serve(listener, app)
+    axum::serve(listener, router(state).fallback(frontend_handler))
         .await
         .map_err(OxyError::Io)
 }
