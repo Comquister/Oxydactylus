@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthUser,
     error::{PanelError, Result},
-    permissions::{is_valid_permission, USER_CREATE, USER_READ},
+    permissions::{is_valid_permission, USER_CREATE, USER_DELETE, USER_READ, USER_UPDATE},
     AppState,
 };
 
@@ -106,6 +106,45 @@ pub async fn create_subuser(
     .fetch_one(&state.db)
     .await?;
     Ok((StatusCode::CREATED, Json(subuser)))
+}
+
+pub async fn update_subuser(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((server_id, subuser_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<UpdateSubuserBody>,
+) -> Result<Json<ServerSubuser>> {
+    check_access(&user, server_id, USER_UPDATE, &state.db).await?;
+    for p in &body.permissions {
+        if !is_valid_permission(p) {
+            return Err(PanelError::Validation(format!("unknown permission: {}", p)));
+        }
+    }
+    let subuser = sqlx::query_as::<_, ServerSubuser>(
+        "UPDATE server_subusers SET permissions = $1
+         WHERE id = $2 AND server_id = $3
+         RETURNING id, server_id, user_id, permissions, created_at",
+    )
+    .bind(&body.permissions)
+    .bind(subuser_id)
+    .bind(server_id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(subuser))
+}
+
+pub async fn delete_subuser(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((server_id, subuser_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode> {
+    check_access(&user, server_id, USER_DELETE, &state.db).await?;
+    sqlx::query("DELETE FROM server_subusers WHERE id = $1 AND server_id = $2")
+        .bind(subuser_id)
+        .bind(server_id)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -336,4 +375,90 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
     }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn owner_can_update_subuser_permissions(pool: sqlx::PgPool) {
+        let (admin_id, admin_token) = seed_admin(&pool).await;
+        let (sub_id, _) = seed_user(&pool, "upd@t.com").await;
+        let node_id = seed_node(&pool).await;
+        let server_id = seed_server(&pool, admin_id, node_id, "upd-srv").await;
+
+        let subuser_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO server_subusers (server_id, user_id, permissions)
+             VALUES ($1,$2,ARRAY['control.start']) RETURNING id",
+        )
+        .bind(server_id).bind(sub_id)
+        .fetch_one(&pool).await.unwrap();
+
+        let app = router(make_state(pool));
+        let body = serde_json::json!({ "permissions": ["control.start", "control.stop"] });
+        let req = Request::builder()
+            .method("PATCH")
+            .uri(format!("/api/servers/{}/subusers/{}", server_id, subuser_id))
+            .header("authorization", format!("Bearer {}", admin_token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let su: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let perms = su["permissions"].as_array().unwrap();
+        assert!(perms.iter().any(|p| p == "control.stop"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn owner_can_delete_subuser(pool: sqlx::PgPool) {
+        let (admin_id, admin_token) = seed_admin(&pool).await;
+        let (sub_id, _) = seed_user(&pool, "del@t.com").await;
+        let node_id = seed_node(&pool).await;
+        let server_id = seed_server(&pool, admin_id, node_id, "del-srv").await;
+
+        let subuser_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO server_subusers (server_id, user_id, permissions)
+             VALUES ($1,$2,ARRAY[]::text[]) RETURNING id",
+        )
+        .bind(server_id).bind(sub_id)
+        .fetch_one(&pool).await.unwrap();
+
+        let app = router(make_state(pool.clone()));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/servers/{}/subusers/{}", server_id, subuser_id))
+            .header("authorization", format!("Bearer {}", admin_token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM server_subusers WHERE id = $1",
+        )
+        .bind(subuser_id)
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn non_owner_cannot_delete_subuser(pool: sqlx::PgPool) {
+        let (admin_id, _) = seed_admin(&pool).await;
+        let (other_id, other_token) = seed_user(&pool, "del2@t.com").await;
+        let node_id = seed_node(&pool).await;
+        let server_id = seed_server(&pool, admin_id, node_id, "del2-srv").await;
+
+        let subuser_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO server_subusers (server_id, user_id, permissions)
+             VALUES ($1,$2,ARRAY[]::text[]) RETURNING id",
+        )
+        .bind(server_id).bind(other_id)
+        .fetch_one(&pool).await.unwrap();
+
+        let app = router(make_state(pool));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/servers/{}/subusers/{}", server_id, subuser_id))
+            .header("authorization", format!("Bearer {}", other_token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
 }
+

@@ -394,6 +394,10 @@ pub fn servers_router() -> Router<AppState> {
             "/:id/subusers",
             get(subusers::list_subusers).post(subusers::create_subuser),
         )
+        .route(
+            "/:id/subusers/:uid",
+            axum::routing::patch(subusers::update_subuser).delete(subusers::delete_subuser),
+        )
 }
 
 #[cfg(test)]
