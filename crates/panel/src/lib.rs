@@ -15,6 +15,7 @@ pub use error::{PanelError, Result};
 use axum::routing::get;
 use oxy_core::{OxyError, PanelConfig};
 use sqlx::PgPool;
+use tower_http::services::{ServeDir, ServeFile};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -48,7 +49,15 @@ pub async fn run(config: PanelConfig) -> oxy_core::Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.http_listen)
         .await
         .map_err(OxyError::Io)?;
-    axum::serve(listener, router(state))
+    let app = match config.public_dir {
+        Some(dir) => {
+            let spa = ServeDir::new(&dir)
+                .not_found_service(ServeFile::new(format!("{}/index.html", dir)));
+            router(state).fallback_service(spa)
+        }
+        None => router(state),
+    };
+    axum::serve(listener, app)
         .await
         .map_err(OxyError::Io)
 }
