@@ -1,38 +1,38 @@
 CREATE TABLE users (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    id            TEXT        PRIMARY KEY,
     email         TEXT        NOT NULL UNIQUE,
     password_hash TEXT        NOT NULL,
     is_admin      BOOLEAN     NOT NULL DEFAULT FALSE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at    TEXT        NOT NULL
 );
 
 CREATE TABLE nodes (
-    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    id         TEXT        PRIMARY KEY,
     name       TEXT        NOT NULL UNIQUE,
     grpc_addr  TEXT        NOT NULL,
     token      TEXT        NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT        NOT NULL
 );
 
 CREATE TABLE eggs (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    id            TEXT        PRIMARY KEY,
     name          TEXT        NOT NULL,
     description   TEXT,
     author        TEXT,
     version       TEXT        NOT NULL DEFAULT '1.0.0',
-    features      TEXT[]      NOT NULL DEFAULT '{}',
-    file_denylist TEXT[]      NOT NULL DEFAULT '{}',
-    docker_images JSONB       NOT NULL DEFAULT '{}',
+    features      TEXT        NOT NULL DEFAULT '[]',
+    file_denylist TEXT        NOT NULL DEFAULT '[]',
+    docker_images TEXT        NOT NULL DEFAULT '{}',
     start_cmd     TEXT        NOT NULL,
     stop_cmd      TEXT        NOT NULL DEFAULT 'stop',
     startup_done  TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at    TEXT        NOT NULL,
+    updated_at    TEXT        NOT NULL
 );
 
 CREATE TABLE egg_variables (
-    id            UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
-    egg_id        UUID    NOT NULL REFERENCES eggs(id) ON DELETE CASCADE,
+    id            TEXT    PRIMARY KEY,
+    egg_id        TEXT    NOT NULL REFERENCES eggs(id) ON DELETE CASCADE,
     name          TEXT    NOT NULL,
     description   TEXT,
     env_variable  TEXT    NOT NULL,
@@ -44,41 +44,55 @@ CREATE TABLE egg_variables (
 );
 
 CREATE TABLE egg_install_scripts (
-    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    egg_id     UUID NOT NULL UNIQUE REFERENCES eggs(id) ON DELETE CASCADE,
+    id         TEXT NOT NULL PRIMARY KEY,
+    egg_id     TEXT NOT NULL UNIQUE REFERENCES eggs(id) ON DELETE CASCADE,
     container  TEXT NOT NULL,
     entrypoint TEXT NOT NULL DEFAULT 'bash',
     script     TEXT NOT NULL
 );
 
 CREATE TABLE egg_config_files (
-    id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    egg_id  UUID NOT NULL REFERENCES eggs(id) ON DELETE CASCADE,
+    id      TEXT PRIMARY KEY,
+    egg_id  TEXT NOT NULL REFERENCES eggs(id) ON DELETE CASCADE,
     path    TEXT NOT NULL,
-    parser  TEXT NOT NULL CHECK (parser IN ('properties','json','yaml','ini','xml')),
-    patches JSONB NOT NULL
+    parser  TEXT NOT NULL,
+    patches TEXT NOT NULL
+);
+
+CREATE TABLE allocations (
+    id         TEXT    PRIMARY KEY,
+    node_id    TEXT    NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    ip         TEXT    NOT NULL,
+    ip_alias   TEXT,
+    port       INTEGER NOT NULL,
+    server_id  TEXT,
+    created_at TEXT    NOT NULL,
+    UNIQUE(node_id, ip, port)
 );
 
 CREATE TABLE servers (
-    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     UUID        NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    node_id     UUID        NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT,
-    egg_id      UUID        REFERENCES eggs(id),
-    name        TEXT        NOT NULL UNIQUE,
-    image       TEXT        NOT NULL,
-    memory_mb   INT         NOT NULL CHECK (memory_mb > 0),
-    cpu_percent INT         NOT NULL CHECK (cpu_percent > 0),
-    env         TEXT[]      NOT NULL DEFAULT '{}',
-    status      TEXT        NOT NULL DEFAULT 'stopped'
-                            CHECK (status IN ('installing','running','stopped','error')),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id               TEXT        PRIMARY KEY,
+    user_id          TEXT        NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    node_id          TEXT        NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT,
+    egg_id           TEXT        REFERENCES eggs(id),
+    allocation_id    TEXT        REFERENCES allocations(id),
+    name             TEXT        NOT NULL UNIQUE,
+    image            TEXT        NOT NULL,
+    memory_mb        INT         NOT NULL,
+    cpu_percent      INT         NOT NULL,
+    env              TEXT        NOT NULL DEFAULT '[]',
+    status           TEXT        NOT NULL DEFAULT 'stopped',
+    database_limit   INTEGER     NOT NULL DEFAULT 0,
+    backup_limit     INTEGER     NOT NULL DEFAULT 0,
+    allocation_limit INTEGER     NOT NULL DEFAULT 1,
+    created_at       TEXT        NOT NULL
 );
 
 CREATE TABLE server_subusers (
-    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    server_id   UUID        NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-    user_id     UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    permissions TEXT[]      NOT NULL DEFAULT '{}',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id          TEXT        PRIMARY KEY,
+    server_id   TEXT        NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    user_id     TEXT        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    permissions TEXT        NOT NULL DEFAULT '[]',
+    created_at  TEXT        NOT NULL,
     UNIQUE (server_id, user_id)
 );
