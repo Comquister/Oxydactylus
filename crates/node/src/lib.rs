@@ -1,5 +1,6 @@
 pub mod docker;
 pub mod error;
+pub mod files;
 pub mod interceptor;
 pub mod server;
 pub mod stream;

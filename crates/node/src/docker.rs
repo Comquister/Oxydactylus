@@ -31,6 +31,7 @@ pub trait DockerBackend: Send + Sync + 'static {
     async fn stop_container(&self, id: String, timeout: u32) -> Result<()>;
     async fn delete_container(&self, id: String) -> Result<()>;
     async fn send_command(&self, id: String, command: String) -> Result<()>;
+    async fn send_command_with_output(&self, id: String, command: String) -> Result<String>;
     async fn get_stats(&self, id: String) -> Result<ContainerStats>;
     async fn log_stream(&self, id: String, follow: bool)
         -> Result<BoxStream<'static, Result<LogChunk>>>;
@@ -152,6 +153,43 @@ impl DockerBackend for BollardDocker {
             .flush()
             .await
             .map_err(|e| NodeError::Docker(e.to_string()))
+    }
+
+    async fn send_command_with_output(&self, id: String, command: String) -> Result<String> {
+        use bollard::container::AttachContainerOptions;
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        let mut attach = self.inner
+            .attach_container(&id, Some(AttachContainerOptions::<String> {
+                stdin:  Some(true),
+                stream: Some(true),
+                stdout: Some(true),
+                stderr: Some(true),
+                ..Default::default()
+            }))
+            .await
+            .map_err(NodeError::from)?;
+
+        let payload = format!("{}\n", command);
+        attach.input
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| NodeError::Docker(e.to_string()))?;
+        attach.input
+            .flush()
+            .await
+            .map_err(|e| NodeError::Docker(e.to_string()))?;
+
+        let mut output = String::new();
+        while let Some(msg) = attach.output.next().await {
+            match msg {
+                Ok(msg) => output.push_str(&msg.to_string()),
+                Err(e) => return Err(NodeError::Docker(e.to_string())),
+            }
+        }
+
+        Ok(output)
     }
 
     async fn get_stats(&self, id: String) -> Result<ContainerStats> {
@@ -302,6 +340,18 @@ mod tests {
             .returning(|_, _| async { Ok(()) }.boxed());
 
         mock.send_command("srv-1".into(), "say hello".into()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mock_send_command_with_output_returns_string() {
+        let mut mock = MockDockerBackend::new();
+        mock.expect_send_command_with_output()
+            .withf(|id, cmd| id == "srv-1" && cmd.contains("ls"))
+            .once()
+            .returning(|_, _| async { Ok("file1\nfile2\n".to_string()) }.boxed());
+
+        let output = mock.send_command_with_output("srv-1".into(), "ls /root".into()).await.unwrap();
+        assert_eq!(output, "file1\nfile2\n");
     }
 
     #[tokio::test]
