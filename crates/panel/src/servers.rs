@@ -16,6 +16,7 @@ use crate::{
     error::{PanelError, Result},
     node_client::NodeClient,
     permissions::{CONTROL_CONSOLE, CONTROL_RESTART, CONTROL_START, CONTROL_STOP},
+    subusers,
     AppState,
 };
 
@@ -381,6 +382,7 @@ pub fn servers_router() -> Router<AppState> {
         .route("/:id/command",   post(server_command))
         .route("/:id/stats",     get(server_stats))
         .route("/:id/logs",      get(stream_server_logs))
+        .route("/:id/subusers",  get(subusers::list_subusers).post(subusers::create_subuser))
 }
 
 #[cfg(test)]

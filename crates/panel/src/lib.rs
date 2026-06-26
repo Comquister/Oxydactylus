@@ -8,6 +8,7 @@ mod nodes;
 mod servers;
 mod users;
 mod eggs;
+pub mod subusers;
 
 pub use error::{PanelError, Result};
 
