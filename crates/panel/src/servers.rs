@@ -49,16 +49,37 @@ async fn get_node_client(state: &AppState, node_id: Uuid) -> Result<NodeClient> 
     NodeClient::connect(&row.grpc_addr, &row.token).await
 }
 
+async fn fetch_server(db: &sqlx::PgPool, id: Uuid) -> Result<Server> {
+    sqlx::query_as::<_, Server>(
+        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+         FROM servers WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(db)
+    .await
+    .map_err(Into::into)
+}
+
 async fn list_servers(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
 ) -> Result<Json<Vec<Server>>> {
-    let servers = sqlx::query_as::<_, Server>(
-        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
-         FROM servers ORDER BY created_at",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let servers = if user.is_admin {
+        sqlx::query_as::<_, Server>(
+            "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+             FROM servers ORDER BY created_at",
+        )
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<_, Server>(
+            "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
+             FROM servers WHERE user_id = $1 ORDER BY created_at",
+        )
+        .bind(user.id)
+        .fetch_all(&state.db)
+        .await?
+    };
     Ok(Json(servers))
 }
 
@@ -152,16 +173,13 @@ async fn create_server(
 
 async fn get_server(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Server>> {
-    let server = sqlx::query_as::<_, Server>(
-        "SELECT id, user_id, node_id, name, image, memory_mb, cpu_percent, env, status, created_at
-         FROM servers WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
+    let server = fetch_server(&state.db, id).await?;
+    if !user.is_admin && server.user_id != user.id {
+        return Err(PanelError::Forbidden);
+    }
     Ok(Json(server))
 }
 
@@ -882,5 +900,90 @@ mod tests {
         // env should contain the resolved var
         let env_arr = srv["env"].as_array().unwrap();
         assert!(env_arr.iter().any(|v| v.as_str() == Some("SERVER_JARFILE=purpur.jar")));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn list_servers_filters_by_owner(pool: sqlx::PgPool) {
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (admin_id, admin_token) = seed_admin(&pool).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        // criar segundo usuário
+        let other_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        )
+        .bind("other@test.com").bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .fetch_one(&pool).await.unwrap();
+        let other_token = crate::auth::encode_token(other_id, false, "access", SECRET, 900).unwrap();
+
+        // admin cria servidor para si mesmo
+        sqlx::query(
+            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(admin_id).bind(node_id).bind("admin-srv").bind("ubuntu").bind(512).bind(50)
+        .execute(&pool).await.unwrap();
+
+        // admin cria servidor para other
+        sqlx::query(
+            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(other_id).bind(node_id).bind("other-srv").bind("ubuntu").bind(512).bind(50)
+        .execute(&pool).await.unwrap();
+
+        let app = router(make_state(pool));
+
+        // admin vê os dois
+        let req = Request::builder()
+            .method("GET").uri("/api/servers")
+            .header("authorization", format!("Bearer {}", admin_token))
+            .body(Body::empty()).unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 2);
+
+        // other vê só o seu
+        let req = Request::builder()
+            .method("GET").uri("/api/servers")
+            .header("authorization", format!("Bearer {}", other_token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["name"], "other-srv");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_server_forbidden_for_non_owner(pool: sqlx::PgPool) {
+        let (admin_id, _) = seed_admin(&pool).await;
+        let node_addr = start_mock_node("node-token").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let node_id = seed_node(&pool, &node_addr).await;
+
+        let other_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        )
+        .bind("other2@test.com").bind("$argon2id$v=19$m=19456,t=2,p=1$fakehash")
+        .fetch_one(&pool).await.unwrap();
+        let other_token = crate::auth::encode_token(other_id, false, "access", SECRET, 900).unwrap();
+
+        let server_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        )
+        .bind(admin_id).bind(node_id).bind("forbidden-srv").bind("ubuntu").bind(512).bind(50)
+        .fetch_one(&pool).await.unwrap();
+
+        let app = router(make_state(pool));
+        let req = Request::builder()
+            .method("GET").uri(format!("/api/servers/{}", server_id))
+            .header("authorization", format!("Bearer {}", other_token))
+            .body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 }
