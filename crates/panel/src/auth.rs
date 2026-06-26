@@ -355,7 +355,6 @@ mod tests {
 
         let token = encode_token(user_id, false, "access", SECRET, 900).unwrap();
 
-        // GET /api/me com token na query string
         let app = crate::router(state);
         let req = Request::builder()
             .method("GET")
