@@ -16,32 +16,29 @@ use crate::{
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct User {
-    pub id:              Uuid,
-    pub email:          String,
+    pub id: Uuid,
+    pub email: String,
     #[serde(skip)]
-    pub password_hash:  String,
-    pub is_admin:       bool,
-    pub created_at:     DateTime<Utc>,
+    pub password_hash: String,
+    pub is_admin: bool,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateUserRequest {
-    email:    String,
+    email: String,
     password: String,
     is_admin: bool,
 }
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct MeResponse {
-    pub id:       Uuid,
-    pub email:    String,
+    pub id: Uuid,
+    pub email: String,
     pub is_admin: bool,
 }
 
-async fn list_users(
-    State(state): State<AppState>,
-    _admin: AdminUser,
-) -> Result<Json<Vec<User>>> {
+async fn list_users(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Vec<User>>> {
     let users = sqlx::query_as::<_, User>(
         "SELECT id, email, password_hash, is_admin, created_at FROM users ORDER BY created_at",
     )
@@ -111,22 +108,18 @@ async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn me(
-    State(state): State<AppState>,
-    user: AuthUser,
-) -> Result<Json<MeResponse>> {
-    let row = sqlx::query_as::<_, MeResponse>(
-        "SELECT id, email, is_admin FROM users WHERE id = $1",
-    )
-    .bind(user.id)
-    .fetch_one(&state.db)
-    .await?;
+pub async fn me(State(state): State<AppState>, user: AuthUser) -> Result<Json<MeResponse>> {
+    let row =
+        sqlx::query_as::<_, MeResponse>("SELECT id, email, is_admin FROM users WHERE id = $1")
+            .bind(user.id)
+            .fetch_one(&state.db)
+            .await?;
     Ok(Json(row))
 }
 
 pub fn users_router() -> Router<AppState> {
     Router::new()
-        .route("/",    get(list_users).post(create_user))
+        .route("/", get(list_users).post(create_user))
         .route("/:id", get(get_user).delete(delete_user))
 }
 
@@ -134,13 +127,19 @@ pub fn users_router() -> Router<AppState> {
 mod tests {
     use super::*;
     use crate::{auth::hash_password, router, AppState};
-    use axum::{body::Body, http::{Request, StatusCode}};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
     use uuid::Uuid;
 
     fn make_state(pool: sqlx::PgPool) -> AppState {
-        AppState { db: pool, jwt_secret: "test-secret-at-least-32-chars-long!!".to_string() }
+        AppState {
+            db: pool,
+            jwt_secret: "test-secret-at-least-32-chars-long!!".to_string(),
+        }
     }
 
     async fn seed_admin(pool: &sqlx::PgPool) -> (Uuid, String) {
@@ -149,20 +148,33 @@ mod tests {
         sqlx::query(
             "INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)",
         )
-        .bind(id).bind("admin@test.com").bind(&hash).bind(true)
-        .execute(pool).await.unwrap();
+        .bind(id)
+        .bind("admin@test.com")
+        .bind(&hash)
+        .bind(true)
+        .execute(pool)
+        .await
+        .unwrap();
         // return JWT for admin
         let token = crate::auth::encode_token(
-            id, true, "access", "test-secret-at-least-32-chars-long!!", 900,
-        ).unwrap();
+            id,
+            true,
+            "access",
+            "test-secret-at-least-32-chars-long!!",
+            900,
+        )
+        .unwrap();
         (id, token)
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn list_users_requires_auth(pool: sqlx::PgPool) {
         let app = router(make_state(pool));
-        let req = Request::builder().method("GET").uri("/api/users")
-            .body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/users")
+            .body(Body::empty())
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
@@ -173,16 +185,29 @@ mod tests {
         sqlx::query(
             "INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)",
         )
-        .bind(id).bind("user@test.com").bind(hash_password("pass").unwrap()).bind(false)
-        .execute(&pool).await.unwrap();
+        .bind(id)
+        .bind("user@test.com")
+        .bind(hash_password("pass").unwrap())
+        .bind(false)
+        .execute(&pool)
+        .await
+        .unwrap();
         let token = crate::auth::encode_token(
-            id, false, "access", "test-secret-at-least-32-chars-long!!", 900,
-        ).unwrap();
+            id,
+            false,
+            "access",
+            "test-secret-at-least-32-chars-long!!",
+            900,
+        )
+        .unwrap();
 
         let app = router(make_state(pool));
-        let req = Request::builder().method("GET").uri("/api/users")
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/users")
             .header("authorization", format!("Bearer {}", token))
-            .body(Body::empty()).unwrap();
+            .body(Body::empty())
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
@@ -191,9 +216,12 @@ mod tests {
     async fn admin_can_list_users(pool: sqlx::PgPool) {
         let (_id, token) = seed_admin(&pool).await;
         let app = router(make_state(pool));
-        let req = Request::builder().method("GET").uri("/api/users")
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/users")
             .header("authorization", format!("Bearer {}", token))
-            .body(Body::empty()).unwrap();
+            .body(Body::empty())
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
@@ -210,10 +238,13 @@ mod tests {
             "password": "newpassword",
             "is_admin": false
         });
-        let req = Request::builder().method("POST").uri("/api/users")
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/users")
             .header("authorization", format!("Bearer {}", token))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
     }
@@ -225,17 +256,29 @@ mod tests {
         sqlx::query(
             "INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)",
         )
-        .bind(id).bind("a@t.com").bind(&hash).bind(true)
-        .execute(&pool).await.unwrap();
+        .bind(id)
+        .bind("a@t.com")
+        .bind(&hash)
+        .bind(true)
+        .execute(&pool)
+        .await
+        .unwrap();
         let token = crate::auth::encode_token(
-            id, true, "access", "test-secret-at-least-32-chars-long!!", 900,
-        ).unwrap();
+            id,
+            true,
+            "access",
+            "test-secret-at-least-32-chars-long!!",
+            900,
+        )
+        .unwrap();
 
         let app = router(make_state(pool));
         let req = Request::builder()
-            .method("GET").uri("/api/me")
+            .method("GET")
+            .uri("/api/me")
             .header("authorization", format!("Bearer {}", token))
-            .body(Body::empty()).unwrap();
+            .body(Body::empty())
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
@@ -249,10 +292,11 @@ mod tests {
     async fn me_requires_auth(pool: sqlx::PgPool) {
         let app = router(make_state(pool));
         let req = Request::builder()
-            .method("GET").uri("/api/me")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/me")
+            .body(Body::empty())
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }
-

@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use crate::error::Result;
 use regex::Regex;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
-use crate::error::Result;
 
 pub fn resolve_vars(template: &str, vars: &HashMap<String, String>) -> String {
     let mut result = template.to_string();
@@ -45,9 +45,10 @@ pub fn validate_var(env_variable: &str, value: &str, rules: &str) -> crate::erro
             return Ok(());
         }
         if parts.iter().any(|r| r == "required") {
-            return Err(crate::error::PanelError::Validation(
-                format!("{}: value is required", env_variable)
-            ));
+            return Err(crate::error::PanelError::Validation(format!(
+                "{}: value is required",
+                env_variable
+            )));
         }
         return Ok(());
     }
@@ -59,69 +60,102 @@ pub fn validate_var(env_variable: &str, value: &str, rules: &str) -> crate::erro
             continue;
         }
         if rule == "integer" {
-            value.parse::<i64>().map_err(|_| crate::error::PanelError::Validation(
-                format!("{}: must be an integer", env_variable)
-            ))?;
+            value.parse::<i64>().map_err(|_| {
+                crate::error::PanelError::Validation(format!(
+                    "{}: must be an integer",
+                    env_variable
+                ))
+            })?;
         } else if rule == "boolean" {
             if value != "true" && value != "false" {
-                return Err(crate::error::PanelError::Validation(
-                    format!("{}: must be true or false", env_variable)
-                ));
+                return Err(crate::error::PanelError::Validation(format!(
+                    "{}: must be true or false",
+                    env_variable
+                )));
             }
         } else if let Some(n) = rule.strip_prefix("max:") {
             if is_integer_field {
-                let max_val: i64 = n.parse().map_err(|_| crate::error::PanelError::Validation(
-                    format!("{}: invalid max rule", env_variable)
-                ))?;
-                let int_val: i64 = value.parse().map_err(|_| crate::error::PanelError::Validation(
-                    format!("{}: must be an integer", env_variable)
-                ))?;
+                let max_val: i64 = n.parse().map_err(|_| {
+                    crate::error::PanelError::Validation(format!(
+                        "{}: invalid max rule",
+                        env_variable
+                    ))
+                })?;
+                let int_val: i64 = value.parse().map_err(|_| {
+                    crate::error::PanelError::Validation(format!(
+                        "{}: must be an integer",
+                        env_variable
+                    ))
+                })?;
                 if int_val > max_val {
-                    return Err(crate::error::PanelError::Validation(
-                        format!("{}: must be <= {}", env_variable, max_val)
-                    ));
+                    return Err(crate::error::PanelError::Validation(format!(
+                        "{}: must be <= {}",
+                        env_variable, max_val
+                    )));
                 }
             } else {
-                let max: usize = n.parse().map_err(|_| crate::error::PanelError::Validation(
-                    format!("{}: invalid max rule", env_variable)
-                ))?;
+                let max: usize = n.parse().map_err(|_| {
+                    crate::error::PanelError::Validation(format!(
+                        "{}: invalid max rule",
+                        env_variable
+                    ))
+                })?;
                 if value.len() > max {
-                    return Err(crate::error::PanelError::Validation(
-                        format!("{}: exceeds max length {}", env_variable, max)
-                    ));
+                    return Err(crate::error::PanelError::Validation(format!(
+                        "{}: exceeds max length {}",
+                        env_variable, max
+                    )));
                 }
             }
         } else if let Some(n) = rule.strip_prefix("min:") {
             if is_integer_field {
-                let min_val: i64 = n.parse().map_err(|_| crate::error::PanelError::Validation(
-                    format!("{}: invalid min rule", env_variable)
-                ))?;
-                let int_val: i64 = value.parse().map_err(|_| crate::error::PanelError::Validation(
-                    format!("{}: must be an integer", env_variable)
-                ))?;
+                let min_val: i64 = n.parse().map_err(|_| {
+                    crate::error::PanelError::Validation(format!(
+                        "{}: invalid min rule",
+                        env_variable
+                    ))
+                })?;
+                let int_val: i64 = value.parse().map_err(|_| {
+                    crate::error::PanelError::Validation(format!(
+                        "{}: must be an integer",
+                        env_variable
+                    ))
+                })?;
                 if int_val < min_val {
-                    return Err(crate::error::PanelError::Validation(
-                        format!("{}: must be >= {}", env_variable, min_val)
-                    ));
+                    return Err(crate::error::PanelError::Validation(format!(
+                        "{}: must be >= {}",
+                        env_variable, min_val
+                    )));
                 }
             } else {
-                let min: usize = n.parse().map_err(|_| crate::error::PanelError::Validation(
-                    format!("{}: invalid min rule", env_variable)
-                ))?;
+                let min: usize = n.parse().map_err(|_| {
+                    crate::error::PanelError::Validation(format!(
+                        "{}: invalid min rule",
+                        env_variable
+                    ))
+                })?;
                 if value.len() < min {
-                    return Err(crate::error::PanelError::Validation(
-                        format!("{}: below min length {}", env_variable, min)
-                    ));
+                    return Err(crate::error::PanelError::Validation(format!(
+                        "{}: below min length {}",
+                        env_variable, min
+                    )));
                 }
             }
-        } else if let Some(pat) = rule.strip_prefix("regex:/").and_then(|s| s.strip_suffix('/')) {
-            let re = Regex::new(pat).map_err(|_| crate::error::PanelError::Validation(
-                format!("{}: invalid regex pattern", env_variable)
-            ))?;
+        } else if let Some(pat) = rule
+            .strip_prefix("regex:/")
+            .and_then(|s| s.strip_suffix('/'))
+        {
+            let re = Regex::new(pat).map_err(|_| {
+                crate::error::PanelError::Validation(format!(
+                    "{}: invalid regex pattern",
+                    env_variable
+                ))
+            })?;
             if !re.is_match(value) {
-                return Err(crate::error::PanelError::Validation(
-                    format!("{}: does not match required pattern", env_variable)
-                ));
+                return Err(crate::error::PanelError::Validation(format!(
+                    "{}: does not match required pattern",
+                    env_variable
+                )));
             }
         }
     }
@@ -143,7 +177,11 @@ pub async fn load_egg_env(
     let mut resolved = Vec::new();
     for (env_var, default, rules, user_editable) in rows {
         let val = if user_editable {
-            user_vars.get(&env_var).cloned().or(default).unwrap_or_default()
+            user_vars
+                .get(&env_var)
+                .cloned()
+                .or(default)
+                .unwrap_or_default()
         } else {
             default.unwrap_or_default()
         };

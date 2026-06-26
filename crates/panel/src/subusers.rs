@@ -1,8 +1,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::get,
-    Json, Router,
+    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,16 +16,16 @@ use crate::{
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct ServerSubuser {
-    pub id:          Uuid,
-    pub server_id:   Uuid,
-    pub user_id:     Uuid,
+    pub id: Uuid,
+    pub server_id: Uuid,
+    pub user_id: Uuid,
     pub permissions: Vec<String>,
-    pub created_at:  DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SubuserBody {
-    pub user_id:     Uuid,
+    pub user_id: Uuid,
     pub permissions: Vec<String>,
 }
 
@@ -109,19 +108,16 @@ pub async fn create_subuser(
     Ok((StatusCode::CREATED, Json(subuser)))
 }
 
-pub fn subusers_router() -> Router<AppState> {
-    Router::new()
-        .route("/", get(list_subusers).post(create_subuser))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
         auth::{encode_token, hash_password},
         router, AppState,
     };
-    use axum::{body::Body, http::{Request, StatusCode}};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -129,15 +125,23 @@ mod tests {
     const SECRET: &str = "test-secret-at-least-32-chars-long!!";
 
     fn make_state(pool: sqlx::PgPool) -> AppState {
-        AppState { db: pool, jwt_secret: SECRET.to_string() }
+        AppState {
+            db: pool,
+            jwt_secret: SECRET.to_string(),
+        }
     }
 
     async fn seed_admin(pool: &sqlx::PgPool) -> (Uuid, String) {
         let id = Uuid::new_v4();
         let hash = hash_password("pass").unwrap();
         sqlx::query("INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1,$2,$3,$4)")
-            .bind(id).bind("a@t.com").bind(&hash).bind(true)
-            .execute(pool).await.unwrap();
+            .bind(id)
+            .bind("a@t.com")
+            .bind(&hash)
+            .bind(true)
+            .execute(pool)
+            .await
+            .unwrap();
         let token = encode_token(id, true, "access", SECRET, 900).unwrap();
         (id, token)
     }
@@ -146,8 +150,12 @@ mod tests {
         let id = Uuid::new_v4();
         let hash = hash_password("pass").unwrap();
         sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1,$2,$3)")
-            .bind(id).bind(email).bind(&hash)
-            .execute(pool).await.unwrap();
+            .bind(id)
+            .bind(email)
+            .bind(&hash)
+            .execute(pool)
+            .await
+            .unwrap();
         let token = encode_token(id, false, "access", SECRET, 900).unwrap();
         (id, token)
     }
@@ -156,8 +164,12 @@ mod tests {
         sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO nodes (name, grpc_addr, token) VALUES ($1,$2,$3) RETURNING id",
         )
-        .bind("n").bind("http://127.0.0.1:1").bind("tok")
-        .fetch_one(pool).await.unwrap()
+        .bind("n")
+        .bind("http://127.0.0.1:1")
+        .bind("tok")
+        .fetch_one(pool)
+        .await
+        .unwrap()
     }
 
     async fn seed_server(pool: &sqlx::PgPool, user_id: Uuid, node_id: Uuid, name: &str) -> Uuid {
@@ -165,8 +177,15 @@ mod tests {
             "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
              VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
         )
-        .bind(user_id).bind(node_id).bind(name).bind("ubuntu").bind(512).bind(50)
-        .fetch_one(pool).await.unwrap()
+        .bind(user_id)
+        .bind(node_id)
+        .bind(name)
+        .bind("ubuntu")
+        .bind(512)
+        .bind(50)
+        .fetch_one(pool)
+        .await
+        .unwrap()
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -186,7 +205,8 @@ mod tests {
             .uri(format!("/api/servers/{}/subusers", server_id))
             .header("authorization", format!("Bearer {}", admin_token))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
@@ -210,7 +230,8 @@ mod tests {
             .uri(format!("/api/servers/{}/subusers", server_id))
             .header("authorization", format!("Bearer {}", other_token))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
@@ -232,7 +253,8 @@ mod tests {
             .uri(format!("/api/servers/{}/subusers", server_id))
             .header("authorization", format!("Bearer {}", admin_token))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -248,19 +270,70 @@ mod tests {
             "INSERT INTO server_subusers (server_id, user_id, permissions)
              VALUES ($1,$2,ARRAY['control.start'])",
         )
-        .bind(server_id).bind(sub_id)
-        .execute(&pool).await.unwrap();
+        .bind(server_id)
+        .bind(sub_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let app = router(make_state(pool));
         let req = Request::builder()
             .method("GET")
             .uri(format!("/api/servers/{}/subusers", server_id))
             .header("authorization", format!("Bearer {}", admin_token))
-            .body(Body::empty()).unwrap();
+            .body(Body::empty())
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(list.as_array().unwrap().len(), 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn subuser_with_permission_can_list_and_add(pool: sqlx::PgPool) {
+        let (owner_id, _) = seed_user(&pool, "owner@t.com").await;
+        let (sub1_id, sub1_token) = seed_user(&pool, "sub1@t.com").await;
+        let (sub2_id, _) = seed_user(&pool, "sub2@t.com").await;
+        let node_id = seed_node(&pool).await;
+        let server_id = seed_server(&pool, owner_id, node_id, "perm-srv").await;
+
+        sqlx::query(
+            "INSERT INTO server_subusers (server_id, user_id, permissions)
+             VALUES ($1, $2, ARRAY['user.read', 'user.create'])",
+        )
+        .bind(server_id)
+        .bind(sub1_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = router(make_state(pool.clone()));
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/servers/{}/subusers", server_id))
+            .header("authorization", format!("Bearer {}", sub1_token))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+
+        let app = router(make_state(pool));
+        let body = serde_json::json!({
+            "user_id":     sub2_id,
+            "permissions": ["control.start"],
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/servers/{}/subusers", server_id))
+            .header("authorization", format!("Bearer {}", sub1_token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
     }
 }

@@ -16,121 +16,130 @@ use crate::{
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct Egg {
-    pub id:            Uuid,
-    pub name:          String,
-    pub description:   Option<String>,
-    pub author:        Option<String>,
-    pub version:       String,
-    pub features:      Vec<String>,
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub version: String,
+    pub features: Vec<String>,
     pub file_denylist: Vec<String>,
     pub docker_images: serde_json::Value,
-    pub start_cmd:     String,
-    pub stop_cmd:      String,
-    pub startup_done:  Option<String>,
-    pub created_at:    DateTime<Utc>,
-    pub updated_at:    DateTime<Utc>,
+    pub start_cmd: String,
+    pub stop_cmd: String,
+    pub startup_done: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateEggRequest {
-    name:          String,
+    name: String,
     #[serde(default)]
-    description:   Option<String>,
+    description: Option<String>,
     #[serde(default)]
-    author:        Option<String>,
+    author: Option<String>,
     #[serde(default = "default_version")]
-    version:       String,
+    version: String,
     #[serde(default)]
-    features:      Vec<String>,
+    features: Vec<String>,
     #[serde(default)]
     file_denylist: Vec<String>,
     #[serde(default = "empty_object")]
     docker_images: serde_json::Value,
-    start_cmd:     String,
+    start_cmd: String,
     #[serde(default = "default_stop")]
-    stop_cmd:      String,
+    stop_cmd: String,
     #[serde(default)]
-    startup_done:  Option<String>,
+    startup_done: Option<String>,
 }
 
-fn default_version() -> String { "1.0.0".to_string() }
-fn default_stop()    -> String { "stop".to_string() }
-fn empty_object()    -> serde_json::Value { serde_json::json!({}) }
+fn default_version() -> String {
+    "1.0.0".to_string()
+}
+fn default_stop() -> String {
+    "stop".to_string()
+}
+fn empty_object() -> serde_json::Value {
+    serde_json::json!({})
+}
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct EggVariable {
-    pub id:            Uuid,
-    pub egg_id:        Uuid,
-    pub name:          String,
-    pub description:   Option<String>,
-    pub env_variable:  String,
-    pub default_val:   Option<String>,
+    pub id: Uuid,
+    pub egg_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub env_variable: String,
+    pub default_val: Option<String>,
     pub user_viewable: bool,
     pub user_editable: bool,
-    pub rules:         Option<String>,
-    pub field_type:    String,
+    pub rules: Option<String>,
+    pub field_type: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateVariableRequest {
-    name:          String,
+    name: String,
     #[serde(default)]
-    description:   Option<String>,
-    env_variable:  String,
+    description: Option<String>,
+    env_variable: String,
     #[serde(default)]
-    default_val:   Option<String>,
+    default_val: Option<String>,
     #[serde(default = "bool_true")]
     user_viewable: bool,
     #[serde(default = "bool_true")]
     user_editable: bool,
     #[serde(default)]
-    rules:         Option<String>,
+    rules: Option<String>,
     #[serde(default = "default_field_type")]
-    field_type:    String,
+    field_type: String,
 }
 
-fn bool_true()         -> bool   { true }
-fn default_field_type() -> String { "text".to_string() }
+fn bool_true() -> bool {
+    true
+}
+fn default_field_type() -> String {
+    "text".to_string()
+}
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct InstallScript {
-    pub id:         Uuid,
-    pub egg_id:     Uuid,
-    pub container:  String,
+    pub id: Uuid,
+    pub egg_id: Uuid,
+    pub container: String,
     pub entrypoint: String,
-    pub script:     String,
+    pub script: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct UpsertInstallScriptRequest {
-    container:  String,
+    container: String,
     #[serde(default = "default_entrypoint")]
     entrypoint: String,
-    script:     String,
+    script: String,
 }
 
-fn default_entrypoint() -> String { "bash".to_string() }
+fn default_entrypoint() -> String {
+    "bash".to_string()
+}
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct ConfigFile {
-    pub id:      Uuid,
-    pub egg_id:  Uuid,
-    pub path:    String,
-    pub parser:  String,
+    pub id: Uuid,
+    pub egg_id: Uuid,
+    pub path: String,
+    pub parser: String,
     pub patches: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateConfigFileRequest {
-    path:    String,
-    parser:  String,
+    path: String,
+    parser: String,
     patches: serde_json::Value,
 }
 
-async fn list_eggs(
-    State(state): State<AppState>,
-    _user: AuthUser,
-) -> Result<Json<Vec<Egg>>> {
+async fn list_eggs(State(state): State<AppState>, _user: AuthUser) -> Result<Json<Vec<Egg>>> {
     let eggs = sqlx::query_as::<_, Egg>(
         "SELECT id, name, description, author, version, features, file_denylist,
                 docker_images, start_cmd, stop_cmd, startup_done, created_at, updated_at
@@ -147,7 +156,9 @@ async fn create_egg(
     Json(body): Json<CreateEggRequest>,
 ) -> Result<(StatusCode, Json<Egg>)> {
     if body.name.is_empty() || body.start_cmd.is_empty() {
-        return Err(PanelError::Validation("name and start_cmd are required".into()));
+        return Err(PanelError::Validation(
+            "name and start_cmd are required".into(),
+        ));
     }
     let egg = sqlx::query_as::<_, Egg>(
         "INSERT INTO eggs
@@ -253,14 +264,12 @@ async fn delete_variable(
     _admin: AdminUser,
     Path((egg_id, var_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode> {
-    let rows = sqlx::query(
-        "DELETE FROM egg_variables WHERE id = $1 AND egg_id = $2",
-    )
-    .bind(var_id)
-    .bind(egg_id)
-    .execute(&state.db)
-    .await?
-    .rows_affected();
+    let rows = sqlx::query("DELETE FROM egg_variables WHERE id = $1 AND egg_id = $2")
+        .bind(var_id)
+        .bind(egg_id)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
     if rows == 0 {
         return Err(PanelError::NotFound(format!("variable {}", var_id)));
     }
@@ -325,10 +334,11 @@ async fn create_config_file(
     Path(egg_id): Path<Uuid>,
     Json(body): Json<CreateConfigFileRequest>,
 ) -> Result<(StatusCode, Json<ConfigFile>)> {
-    let valid_parsers = ["properties","json","yaml","ini","xml"];
+    let valid_parsers = ["properties", "json", "yaml", "ini", "xml"];
     if !valid_parsers.contains(&body.parser.as_str()) {
         return Err(PanelError::Validation(format!(
-            "parser must be one of: {}", valid_parsers.join(", ")
+            "parser must be one of: {}",
+            valid_parsers.join(", ")
         )));
     }
     let cf = sqlx::query_as::<_, ConfigFile>(
@@ -350,14 +360,12 @@ async fn delete_config_file(
     _admin: AdminUser,
     Path((egg_id, cf_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode> {
-    let rows = sqlx::query(
-        "DELETE FROM egg_config_files WHERE id = $1 AND egg_id = $2",
-    )
-    .bind(cf_id)
-    .bind(egg_id)
-    .execute(&state.db)
-    .await?
-    .rows_affected();
+    let rows = sqlx::query("DELETE FROM egg_config_files WHERE id = $1 AND egg_id = $2")
+        .bind(cf_id)
+        .bind(egg_id)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
     if rows == 0 {
         return Err(PanelError::NotFound(format!("config-file {}", cf_id)));
     }
@@ -368,33 +376,33 @@ async fn delete_config_file(
 
 #[derive(Debug, Deserialize)]
 struct Ptdlv2 {
-    name:          String,
+    name: String,
     #[serde(default)]
-    author:        Option<String>,
+    author: Option<String>,
     #[serde(default)]
-    description:   Option<String>,
+    description: Option<String>,
     #[serde(default)]
-    features:      Vec<String>,
+    features: Vec<String>,
     #[serde(default)]
     file_denylist: Vec<String>,
     #[serde(default)]
     docker_images: serde_json::Value,
-    startup:       String,
-    config:        Ptdlv2Config,
+    startup: String,
+    config: Ptdlv2Config,
     #[serde(default)]
-    variables:     Vec<Ptdlv2Variable>,
+    variables: Vec<Ptdlv2Variable>,
     #[serde(default)]
-    scripts:       Option<Ptdlv2Scripts>,
+    scripts: Option<Ptdlv2Scripts>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct Ptdlv2Config {
     #[serde(default = "default_stop")]
-    stop:    String,
+    stop: String,
     #[serde(default)]
     startup: Ptdlv2Startup,
     #[serde(default)]
-    files:   String,
+    files: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -405,20 +413,20 @@ struct Ptdlv2Startup {
 
 #[derive(Debug, Deserialize)]
 struct Ptdlv2Variable {
-    name:          String,
-    env_variable:  String,
+    name: String,
+    env_variable: String,
     #[serde(default)]
     default_value: Option<String>,
     #[serde(default)]
-    description:   Option<String>,
+    description: Option<String>,
     #[serde(default = "bool_true")]
     user_viewable: bool,
     #[serde(default = "bool_true")]
     user_editable: bool,
     #[serde(default)]
-    rules:         Option<String>,
+    rules: Option<String>,
     #[serde(default = "default_field_type")]
-    field_type:    String,
+    field_type: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -428,8 +436,8 @@ struct Ptdlv2Scripts {
 
 #[derive(Debug, Deserialize)]
 struct Ptdlv2InstallScript {
-    script:     String,
-    container:  String,
+    script: String,
+    container: String,
     #[serde(default = "default_entrypoint")]
     entrypoint: String,
 }
@@ -507,8 +515,8 @@ async fn import_egg(
 
 // ── .toml export ─────────────────────────────────────────────────────────────
 
-use axum::response::Response as AxumResponse;
 use axum::http::header;
+use axum::response::Response as AxumResponse;
 
 async fn export_egg_toml(
     State(state): State<AppState>,
@@ -570,20 +578,40 @@ fn build_egg_toml(
 
     // [egg]
     let mut egg_tbl = toml::Table::new();
-    egg_tbl.insert("name".into(),          toml::Value::String(egg.name.clone()));
-    if let Some(a) = &egg.author      { egg_tbl.insert("author".into(),      toml::Value::String(a.clone())); }
-    if let Some(d) = &egg.description { egg_tbl.insert("description".into(), toml::Value::String(d.clone())); }
-    egg_tbl.insert("features".into(),
-        toml::Value::Array(egg.features.iter().map(|f| toml::Value::String(f.clone())).collect()));
-    egg_tbl.insert("file_denylist".into(),
-        toml::Value::Array(egg.file_denylist.iter().map(|f| toml::Value::String(f.clone())).collect()));
+    egg_tbl.insert("name".into(), toml::Value::String(egg.name.clone()));
+    if let Some(a) = &egg.author {
+        egg_tbl.insert("author".into(), toml::Value::String(a.clone()));
+    }
+    if let Some(d) = &egg.description {
+        egg_tbl.insert("description".into(), toml::Value::String(d.clone()));
+    }
+    egg_tbl.insert(
+        "features".into(),
+        toml::Value::Array(
+            egg.features
+                .iter()
+                .map(|f| toml::Value::String(f.clone()))
+                .collect(),
+        ),
+    );
+    egg_tbl.insert(
+        "file_denylist".into(),
+        toml::Value::Array(
+            egg.file_denylist
+                .iter()
+                .map(|f| toml::Value::String(f.clone()))
+                .collect(),
+        ),
+    );
     doc.insert("egg".into(), toml::Value::Table(egg_tbl));
 
     // [startup]
     let mut startup_tbl = toml::Table::new();
     startup_tbl.insert("command".into(), toml::Value::String(egg.start_cmd.clone()));
-    startup_tbl.insert("stop".into(),    toml::Value::String(egg.stop_cmd.clone()));
-    if let Some(d) = &egg.startup_done { startup_tbl.insert("detection".into(), toml::Value::String(d.clone())); }
+    startup_tbl.insert("stop".into(), toml::Value::String(egg.stop_cmd.clone()));
+    if let Some(d) = &egg.startup_done {
+        startup_tbl.insert("detection".into(), toml::Value::String(d.clone()));
+    }
     doc.insert("startup".into(), toml::Value::Table(startup_tbl));
 
     // [docker_images]
@@ -599,47 +627,74 @@ fn build_egg_toml(
 
     // [[variables]]
     if !vars.is_empty() {
-        let var_arr: Vec<toml::Value> = vars.iter().map(|v| {
-            let mut t = toml::Table::new();
-            t.insert("name".into(),          toml::Value::String(v.name.clone()));
-            t.insert("env_variable".into(),  toml::Value::String(v.env_variable.clone()));
-            if let Some(d) = &v.default_val  { t.insert("default".into(),     toml::Value::String(d.clone())); }
-            if let Some(d) = &v.description  { t.insert("description".into(), toml::Value::String(d.clone())); }
-            if let Some(r) = &v.rules        { t.insert("rules".into(),       toml::Value::String(r.clone())); }
-            t.insert("user_viewable".into(), toml::Value::Boolean(v.user_viewable));
-            t.insert("user_editable".into(), toml::Value::Boolean(v.user_editable));
-            t.insert("field_type".into(),    toml::Value::String(v.field_type.clone()));
-            toml::Value::Table(t)
-        }).collect();
+        let var_arr: Vec<toml::Value> = vars
+            .iter()
+            .map(|v| {
+                let mut t = toml::Table::new();
+                t.insert("name".into(), toml::Value::String(v.name.clone()));
+                t.insert(
+                    "env_variable".into(),
+                    toml::Value::String(v.env_variable.clone()),
+                );
+                if let Some(d) = &v.default_val {
+                    t.insert("default".into(), toml::Value::String(d.clone()));
+                }
+                if let Some(d) = &v.description {
+                    t.insert("description".into(), toml::Value::String(d.clone()));
+                }
+                if let Some(r) = &v.rules {
+                    t.insert("rules".into(), toml::Value::String(r.clone()));
+                }
+                t.insert(
+                    "user_viewable".into(),
+                    toml::Value::Boolean(v.user_viewable),
+                );
+                t.insert(
+                    "user_editable".into(),
+                    toml::Value::Boolean(v.user_editable),
+                );
+                t.insert(
+                    "field_type".into(),
+                    toml::Value::String(v.field_type.clone()),
+                );
+                toml::Value::Table(t)
+            })
+            .collect();
         doc.insert("variables".into(), toml::Value::Array(var_arr));
     }
 
     // [install]
     if let Some(i) = install {
         let mut inst = toml::Table::new();
-        inst.insert("container".into(),  toml::Value::String(i.container.clone()));
-        inst.insert("entrypoint".into(), toml::Value::String(i.entrypoint.clone()));
-        inst.insert("script".into(),     toml::Value::String(i.script.clone()));
+        inst.insert("container".into(), toml::Value::String(i.container.clone()));
+        inst.insert(
+            "entrypoint".into(),
+            toml::Value::String(i.entrypoint.clone()),
+        );
+        inst.insert("script".into(), toml::Value::String(i.script.clone()));
         doc.insert("install".into(), toml::Value::Table(inst));
     }
 
     // [[config_files]]
     if !cfs.is_empty() {
-        let cf_arr: Vec<toml::Value> = cfs.iter().map(|cf| {
-            let mut t = toml::Table::new();
-            t.insert("path".into(),   toml::Value::String(cf.path.clone()));
-            t.insert("parser".into(), toml::Value::String(cf.parser.clone()));
-            if let serde_json::Value::Object(patches) = &cf.patches {
-                let mut p = toml::Table::new();
-                for (k, v) in patches {
-                    if let serde_json::Value::String(s) = v {
-                        p.insert(k.clone(), toml::Value::String(s.clone()));
+        let cf_arr: Vec<toml::Value> = cfs
+            .iter()
+            .map(|cf| {
+                let mut t = toml::Table::new();
+                t.insert("path".into(), toml::Value::String(cf.path.clone()));
+                t.insert("parser".into(), toml::Value::String(cf.parser.clone()));
+                if let serde_json::Value::Object(patches) = &cf.patches {
+                    let mut p = toml::Table::new();
+                    for (k, v) in patches {
+                        if let serde_json::Value::String(s) = v {
+                            p.insert(k.clone(), toml::Value::String(s.clone()));
+                        }
                     }
+                    t.insert("patches".into(), toml::Value::Table(p));
                 }
-                t.insert("patches".into(), toml::Value::Table(p));
-            }
-            toml::Value::Table(t)
-        }).collect();
+                toml::Value::Table(t)
+            })
+            .collect();
         doc.insert("config_files".into(), toml::Value::Array(cf_arr));
     }
 
@@ -648,22 +703,34 @@ fn build_egg_toml(
 
 pub fn eggs_router() -> Router<AppState> {
     Router::new()
-        .route("/",                           get(list_eggs).post(create_egg))
-        .route("/import",                     post(import_egg))
-        .route("/:id",                        get(get_egg).delete(delete_egg))
-        .route("/:id/export",                 get(export_egg_toml))
-        .route("/:id/variables",              get(list_variables).post(create_variable))
-        .route("/:id/variables/:var_id",      delete(delete_variable))
-        .route("/:id/install-script",         get(get_install_script).put(upsert_install_script))
-        .route("/:id/config-files",           get(list_config_files).post(create_config_file))
-        .route("/:id/config-files/:cf_id",    delete(delete_config_file))
+        .route("/", get(list_eggs).post(create_egg))
+        .route("/import", post(import_egg))
+        .route("/:id", get(get_egg).delete(delete_egg))
+        .route("/:id/export", get(export_egg_toml))
+        .route("/:id/variables", get(list_variables).post(create_variable))
+        .route("/:id/variables/:var_id", delete(delete_variable))
+        .route(
+            "/:id/install-script",
+            get(get_install_script).put(upsert_install_script),
+        )
+        .route(
+            "/:id/config-files",
+            get(list_config_files).post(create_config_file),
+        )
+        .route("/:id/config-files/:cf_id", delete(delete_config_file))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{auth::{encode_token, hash_password}, router, AppState};
-    use axum::{body::Body, http::{Request, StatusCode}};
+    use crate::{
+        auth::{encode_token, hash_password},
+        router, AppState,
+    };
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -671,7 +738,10 @@ mod tests {
     const SECRET: &str = "test-secret-at-least-32-chars-long!!";
 
     fn make_state(pool: sqlx::PgPool) -> AppState {
-        AppState { db: pool, jwt_secret: SECRET.to_string() }
+        AppState {
+            db: pool,
+            jwt_secret: SECRET.to_string(),
+        }
     }
 
     async fn seed_admin(pool: &sqlx::PgPool) -> String {
@@ -680,8 +750,13 @@ mod tests {
         sqlx::query(
             "INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)",
         )
-        .bind(id).bind("a@t.com").bind(&hash).bind(true)
-        .execute(pool).await.unwrap();
+        .bind(id)
+        .bind("a@t.com")
+        .bind(&hash)
+        .bind(true)
+        .execute(pool)
+        .await
+        .unwrap();
         encode_token(id, true, "access", SECRET, 900).unwrap()
     }
 
@@ -690,9 +765,11 @@ mod tests {
         let token = seed_admin(&pool).await;
         let app = router(make_state(pool));
         let req = Request::builder()
-            .method("GET").uri("/api/eggs")
+            .method("GET")
+            .uri("/api/eggs")
             .header("authorization", format!("Bearer {}", token))
-            .body(Body::empty()).unwrap();
+            .body(Body::empty())
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
@@ -710,24 +787,35 @@ mod tests {
             "stop_cmd": "stop",
             "docker_images": {"Java 21": "ghcr.io/ptero-eggs/yolks:java_21"}
         });
-        let res = app.clone().oneshot(
-            Request::builder()
-                .method("POST").uri("/api/eggs")
-                .header("authorization", format!("Bearer {}", token))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()
-        ).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/eggs")
+                    .header("authorization", format!("Bearer {}", token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         let egg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let egg_id = egg["id"].as_str().unwrap();
 
-        let res2 = app.oneshot(
-            Request::builder()
-                .method("GET").uri(format!("/api/eggs/{}", egg_id))
-                .header("authorization", format!("Bearer {}", token))
-                .body(Body::empty()).unwrap()
-        ).await.unwrap();
+        let res2 = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/eggs/{}", egg_id))
+                    .header("authorization", format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res2.status(), StatusCode::OK);
         let bytes2 = res2.into_body().collect().await.unwrap().to_bytes();
         let got: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
@@ -740,16 +828,25 @@ mod tests {
         let egg_id: Uuid = sqlx::query_scalar(
             "INSERT INTO eggs (name, start_cmd, docker_images) VALUES ($1, $2, $3) RETURNING id",
         )
-        .bind("test-egg").bind("./run.sh").bind(serde_json::json!({}))
-        .fetch_one(&pool).await.unwrap();
+        .bind("test-egg")
+        .bind("./run.sh")
+        .bind(serde_json::json!({}))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         let app = router(make_state(pool));
-        let res = app.oneshot(
-            Request::builder()
-                .method("DELETE").uri(format!("/api/eggs/{}", egg_id))
-                .header("authorization", format!("Bearer {}", token))
-                .body(Body::empty()).unwrap()
-        ).await.unwrap();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/eggs/{}", egg_id))
+                    .header("authorization", format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
     }
 
@@ -759,8 +856,12 @@ mod tests {
         let egg_id: Uuid = sqlx::query_scalar(
             "INSERT INTO eggs (name, start_cmd, docker_images) VALUES ($1, $2, $3) RETURNING id",
         )
-        .bind("e").bind("./run").bind(serde_json::json!({}))
-        .fetch_one(&pool).await.unwrap();
+        .bind("e")
+        .bind("./run")
+        .bind(serde_json::json!({}))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         let app = router(make_state(pool));
         let body = serde_json::json!({
@@ -769,21 +870,32 @@ mod tests {
             "default_val": "1024",
             "rules": "required|integer"
         });
-        let res = app.clone().oneshot(
-            Request::builder()
-                .method("POST").uri(format!("/api/eggs/{}/variables", egg_id))
-                .header("authorization", format!("Bearer {}", token))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()
-        ).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/eggs/{}/variables", egg_id))
+                    .header("authorization", format!("Bearer {}", token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
 
-        let res2 = app.oneshot(
-            Request::builder()
-                .method("GET").uri(format!("/api/eggs/{}/variables", egg_id))
-                .header("authorization", format!("Bearer {}", token))
-                .body(Body::empty()).unwrap()
-        ).await.unwrap();
+        let res2 = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/eggs/{}/variables", egg_id))
+                    .header("authorization", format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res2.status(), StatusCode::OK);
         let bytes = res2.into_body().collect().await.unwrap().to_bytes();
         let vars: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -797,8 +909,12 @@ mod tests {
         let egg_id: Uuid = sqlx::query_scalar(
             "INSERT INTO eggs (name, start_cmd, docker_images) VALUES ($1, $2, $3) RETURNING id",
         )
-        .bind("e").bind("./run").bind(serde_json::json!({}))
-        .fetch_one(&pool).await.unwrap();
+        .bind("e")
+        .bind("./run")
+        .bind(serde_json::json!({}))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         let app = router(make_state(pool));
         let body = serde_json::json!({
@@ -806,21 +922,32 @@ mod tests {
             "entrypoint": "ash",
             "script": "#!/bin/ash\necho hello"
         });
-        let res = app.clone().oneshot(
-            Request::builder()
-                .method("PUT").uri(format!("/api/eggs/{}/install-script", egg_id))
-                .header("authorization", format!("Bearer {}", token))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()
-        ).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/eggs/{}/install-script", egg_id))
+                    .header("authorization", format!("Bearer {}", token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        let res2 = app.oneshot(
-            Request::builder()
-                .method("GET").uri(format!("/api/eggs/{}/install-script", egg_id))
-                .header("authorization", format!("Bearer {}", token))
-                .body(Body::empty()).unwrap()
-        ).await.unwrap();
+        let res2 = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/eggs/{}/install-script", egg_id))
+                    .header("authorization", format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res2.status(), StatusCode::OK);
         let bytes = res2.into_body().collect().await.unwrap().to_bytes();
         let got: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -833,8 +960,12 @@ mod tests {
         let egg_id: Uuid = sqlx::query_scalar(
             "INSERT INTO eggs (name, start_cmd, docker_images) VALUES ($1, $2, $3) RETURNING id",
         )
-        .bind("e").bind("./run").bind(serde_json::json!({}))
-        .fetch_one(&pool).await.unwrap();
+        .bind("e")
+        .bind("./run")
+        .bind(serde_json::json!({}))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         let app = router(make_state(pool));
         let body = serde_json::json!({
@@ -842,21 +973,32 @@ mod tests {
             "parser": "properties",
             "patches": {"server-ip": "0.0.0.0", "server-port": "25565"}
         });
-        let res = app.clone().oneshot(
-            Request::builder()
-                .method("POST").uri(format!("/api/eggs/{}/config-files", egg_id))
-                .header("authorization", format!("Bearer {}", token))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()
-        ).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/eggs/{}/config-files", egg_id))
+                    .header("authorization", format!("Bearer {}", token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
 
-        let res2 = app.oneshot(
-            Request::builder()
-                .method("GET").uri(format!("/api/eggs/{}/config-files", egg_id))
-                .header("authorization", format!("Bearer {}", token))
-                .body(Body::empty()).unwrap()
-        ).await.unwrap();
+        let res2 = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/eggs/{}/config-files", egg_id))
+                    .header("authorization", format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res2.status(), StatusCode::OK);
         let bytes = res2.into_body().collect().await.unwrap().to_bytes();
         let cfs: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -903,13 +1045,18 @@ mod tests {
             }
         });
 
-        let res = app.oneshot(
-            Request::builder()
-                .method("POST").uri("/api/eggs/import")
-                .header("authorization", format!("Bearer {}", token))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&ptdl).unwrap())).unwrap()
-        ).await.unwrap();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/eggs/import")
+                    .header("authorization", format!("Bearer {}", token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ptdl).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         let egg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -918,11 +1065,12 @@ mod tests {
         assert_eq!(egg["startup_done"], "For help, type");
 
         // variable was imported
-        let var_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM egg_variables WHERE egg_id = $1",
-        )
-        .bind(Uuid::parse_str(egg["id"].as_str().unwrap()).unwrap())
-        .fetch_one(&pool).await.unwrap();
+        let var_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM egg_variables WHERE egg_id = $1")
+                .bind(Uuid::parse_str(egg["id"].as_str().unwrap()).unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(var_count, 1);
     }
 
@@ -933,26 +1081,41 @@ mod tests {
             "INSERT INTO eggs (name, start_cmd, stop_cmd, docker_images, startup_done)
              VALUES ($1, $2, $3, $4, $5) RETURNING id",
         )
-        .bind("TestEgg").bind("./run").bind("stop")
+        .bind("TestEgg")
+        .bind("./run")
+        .bind("stop")
         .bind(serde_json::json!({"Java 21": "ghcr.io/test:java_21"}))
         .bind("Server started")
-        .fetch_one(&pool).await.unwrap();
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         sqlx::query(
             "INSERT INTO egg_variables (egg_id, name, env_variable, default_val, rules, field_type)
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
-        .bind(egg_id).bind("Port").bind("PORT").bind("25565")
-        .bind("required|integer").bind("text")
-        .execute(&pool).await.unwrap();
+        .bind(egg_id)
+        .bind("Port")
+        .bind("PORT")
+        .bind("25565")
+        .bind("required|integer")
+        .bind("text")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let app = router(make_state(pool));
-        let res = app.oneshot(
-            Request::builder()
-                .method("GET").uri(format!("/api/eggs/{}/export", egg_id))
-                .header("authorization", format!("Bearer {}", token))
-                .body(Body::empty()).unwrap()
-        ).await.unwrap();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/eggs/{}/export", egg_id))
+                    .header("authorization", format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let ct = res.headers().get("content-type").unwrap().to_str().unwrap();
         assert!(ct.contains("application/toml"), "expected toml, got {}", ct);

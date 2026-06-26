@@ -1,4 +1,8 @@
-use axum::{http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde_json::json;
 
 #[derive(Debug, thiserror::Error)]
@@ -44,14 +48,14 @@ impl From<tonic::Status> for PanelError {
 impl IntoResponse for PanelError {
     fn into_response(self) -> Response {
         let status = match &self {
-            PanelError::NotFound(_)     => StatusCode::NOT_FOUND,
+            PanelError::NotFound(_) => StatusCode::NOT_FOUND,
             PanelError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-            PanelError::Forbidden       => StatusCode::FORBIDDEN,
-            PanelError::Conflict(_)     => StatusCode::CONFLICT,
-            PanelError::Validation(_)   => StatusCode::UNPROCESSABLE_ENTITY,
-            PanelError::Db(_)
-            | PanelError::Node(_)
-            | PanelError::Internal(_)   => StatusCode::INTERNAL_SERVER_ERROR,
+            PanelError::Forbidden => StatusCode::FORBIDDEN,
+            PanelError::Conflict(_) => StatusCode::CONFLICT,
+            PanelError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            PanelError::Db(_) | PanelError::Node(_) | PanelError::Internal(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()
     }
@@ -68,12 +72,18 @@ mod tests {
 
     #[test]
     fn not_found_maps_to_404() {
-        assert_eq!(status_of(PanelError::NotFound("x".into())), StatusCode::NOT_FOUND);
+        assert_eq!(
+            status_of(PanelError::NotFound("x".into())),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[test]
     fn unauthorized_maps_to_401() {
-        assert_eq!(status_of(PanelError::Unauthorized("x".into())), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_of(PanelError::Unauthorized("x".into())),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
@@ -83,16 +93,25 @@ mod tests {
 
     #[test]
     fn conflict_maps_to_409() {
-        assert_eq!(status_of(PanelError::Conflict("x".into())), StatusCode::CONFLICT);
+        assert_eq!(
+            status_of(PanelError::Conflict("x".into())),
+            StatusCode::CONFLICT
+        );
     }
 
     #[test]
     fn validation_maps_to_422() {
-        assert_eq!(status_of(PanelError::Validation("x".into())), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            status_of(PanelError::Validation("x".into())),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     #[test]
     fn db_maps_to_500() {
-        assert_eq!(status_of(PanelError::Db("x".into())), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            status_of(PanelError::Db("x".into())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

@@ -1,16 +1,12 @@
+use futures_util::{Stream, StreamExt};
 use oxy_core::proto::node::{
-    node_service_client::NodeServiceClient,
-    LogLine, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest,
-    ServerProvisionRequest, ServerStartRequest, ServerStats, ServerStatsRequest,
+    node_service_client::NodeServiceClient, LogLine, ServerCommandRequest, ServerDeleteRequest,
+    ServerLogsRequest, ServerProvisionRequest, ServerStartRequest, ServerStats, ServerStatsRequest,
     ServerStopRequest,
 };
-use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use tonic::{
-    metadata::MetadataValue,
-    service::interceptor::InterceptedService,
-    transport::Channel,
-    Request,
+    metadata::MetadataValue, service::interceptor::InterceptedService, transport::Channel, Request,
 };
 
 use crate::error::{PanelError, Result};
@@ -20,10 +16,7 @@ struct BearerInterceptor {
 }
 
 impl tonic::service::Interceptor for BearerInterceptor {
-    fn call(
-        &mut self,
-        mut req: Request<()>,
-    ) -> std::result::Result<Request<()>, tonic::Status> {
+    fn call(&mut self, mut req: Request<()>) -> std::result::Result<Request<()>, tonic::Status> {
         let val = MetadataValue::try_from(format!("Bearer {}", self.token))
             .map_err(|_| tonic::Status::internal("invalid token format"))?;
         req.metadata_mut().insert("authorization", val);
@@ -42,8 +35,12 @@ impl NodeClient {
             .connect()
             .await
             .map_err(|e| PanelError::Node(e.to_string()))?;
-        let interceptor = BearerInterceptor { token: token.to_string() };
-        Ok(Self { inner: NodeServiceClient::with_interceptor(channel, interceptor) })
+        let interceptor = BearerInterceptor {
+            token: token.to_string(),
+        };
+        Ok(Self {
+            inner: NodeServiceClient::with_interceptor(channel, interceptor),
+        })
     }
 
     pub async fn new(node: &crate::nodes::Node) -> Result<Self> {
@@ -52,16 +49,16 @@ impl NodeClient {
 
     pub async fn provision(
         &mut self,
-        server_id:   &str,
-        image:       &str,
-        memory_mb:   u32,
+        server_id: &str,
+        image: &str,
+        memory_mb: u32,
         cpu_percent: u32,
-        env:         Vec<String>,
+        env: Vec<String>,
     ) -> Result<()> {
         self.inner
             .provision_server(ServerProvisionRequest {
-                server_id:   server_id.to_string(),
-                image:       image.to_string(),
+                server_id: server_id.to_string(),
+                image: image.to_string(),
                 memory_mb,
                 cpu_percent,
                 env,
@@ -73,7 +70,9 @@ impl NodeClient {
 
     pub async fn start(&mut self, server_id: &str) -> Result<()> {
         self.inner
-            .start_server(ServerStartRequest { server_id: server_id.to_string() })
+            .start_server(ServerStartRequest {
+                server_id: server_id.to_string(),
+            })
             .await
             .map(|_| ())
             .map_err(PanelError::from)
@@ -92,7 +91,9 @@ impl NodeClient {
 
     pub async fn delete(&mut self, server_id: &str) -> Result<()> {
         self.inner
-            .delete_server(ServerDeleteRequest { server_id: server_id.to_string() })
+            .delete_server(ServerDeleteRequest {
+                server_id: server_id.to_string(),
+            })
             .await
             .map(|_| ())
             .map_err(PanelError::from)
@@ -102,7 +103,7 @@ impl NodeClient {
         self.inner
             .send_command(ServerCommandRequest {
                 server_id: server_id.to_string(),
-                content:   content.to_string(),
+                content: content.to_string(),
             })
             .await
             .map(|_| ())
@@ -111,7 +112,9 @@ impl NodeClient {
 
     pub async fn get_stats(&mut self, server_id: &str) -> Result<ServerStats> {
         self.inner
-            .get_stats(ServerStatsRequest { server_id: server_id.to_string() })
+            .get_stats(ServerStatsRequest {
+                server_id: server_id.to_string(),
+            })
             .await
             .map(|r| r.into_inner())
             .map_err(PanelError::from)
@@ -141,11 +144,11 @@ mod tests {
     use oxy_core::proto::node::{
         node_service_server::{NodeService, NodeServiceServer},
         LogLine, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest,
-        ServerProvisionRequest, ServerReply, ServerStartRequest, ServerStopRequest,
-        ServerStats, ServerStatsRequest,
+        ServerProvisionRequest, ServerReply, ServerStartRequest, ServerStats, ServerStatsRequest,
+        ServerStopRequest,
     };
-    use tonic::{async_trait, Request, Response, Status};
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+    use tonic::{async_trait, Request, Response, Status};
 
     struct EchoNode;
 
@@ -153,39 +156,74 @@ mod tests {
     impl NodeService for EchoNode {
         type StreamLogsStream = ReceiverStream<std::result::Result<LogLine, Status>>;
 
-        async fn provision_server(&self, _: Request<ServerProvisionRequest>)
-            -> std::result::Result<Response<ServerReply>, Status>
-        { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
-
-        async fn start_server(&self, _: Request<ServerStartRequest>)
-            -> std::result::Result<Response<ServerReply>, Status>
-        { Ok(Response::new(ServerReply { success: true, message: "started".into() })) }
-
-        async fn stop_server(&self, _: Request<ServerStopRequest>)
-            -> std::result::Result<Response<ServerReply>, Status>
-        { Ok(Response::new(ServerReply { success: true, message: "stopped".into() })) }
-
-        async fn delete_server(&self, _: Request<ServerDeleteRequest>)
-            -> std::result::Result<Response<ServerReply>, Status>
-        { Ok(Response::new(ServerReply { success: true, message: "deleted".into() })) }
-
-        async fn send_command(&self, _: Request<ServerCommandRequest>)
-            -> std::result::Result<Response<ServerReply>, Status>
-        { Ok(Response::new(ServerReply { success: true, message: "sent".into() })) }
-
-        async fn get_stats(&self, req: Request<ServerStatsRequest>)
-            -> std::result::Result<Response<ServerStats>, Status>
-        {
-            let id = req.into_inner().server_id;
-            Ok(Response::new(ServerStats {
-                server_id: id, memory_bytes: 512, cpu_percent: 5.0,
-                rx_bytes: 100, tx_bytes: 200,
+        async fn provision_server(
+            &self,
+            _: Request<ServerProvisionRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
             }))
         }
 
-        async fn stream_logs(&self, _: Request<ServerLogsRequest>)
-            -> std::result::Result<Response<Self::StreamLogsStream>, Status>
-        {
+        async fn start_server(
+            &self,
+            _: Request<ServerStartRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "started".into(),
+            }))
+        }
+
+        async fn stop_server(
+            &self,
+            _: Request<ServerStopRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "stopped".into(),
+            }))
+        }
+
+        async fn delete_server(
+            &self,
+            _: Request<ServerDeleteRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "deleted".into(),
+            }))
+        }
+
+        async fn send_command(
+            &self,
+            _: Request<ServerCommandRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "sent".into(),
+            }))
+        }
+
+        async fn get_stats(
+            &self,
+            req: Request<ServerStatsRequest>,
+        ) -> std::result::Result<Response<ServerStats>, Status> {
+            let id = req.into_inner().server_id;
+            Ok(Response::new(ServerStats {
+                server_id: id,
+                memory_bytes: 512,
+                cpu_percent: 5.0,
+                rx_bytes: 100,
+                tx_bytes: 200,
+            }))
+        }
+
+        async fn stream_logs(
+            &self,
+            _: Request<ServerLogsRequest>,
+        ) -> std::result::Result<Response<Self::StreamLogsStream>, Status> {
             let (_, rx) = tokio::sync::mpsc::channel(1);
             Ok(Response::new(ReceiverStream::new(rx)))
         }
@@ -216,7 +254,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let mut client = NodeClient::connect(&addr, token).await.unwrap();
-        client.provision("srv-1", "ubuntu:latest", 512, 50, vec!["X=1".into()]).await.unwrap();
+        client
+            .provision("srv-1", "ubuntu:latest", 512, 50, vec!["X=1".into()])
+            .await
+            .unwrap();
         client.start("srv-1").await.unwrap();
     }
 
@@ -252,46 +293,89 @@ mod tests {
         impl NodeService for LogNode {
             type StreamLogsStream = ReceiverStream<std::result::Result<LogLine, Status>>;
 
-            async fn provision_server(&self, _: Request<ServerProvisionRequest>)
-                -> std::result::Result<Response<ServerReply>, Status>
-            { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
-
-            async fn start_server(&self, _: Request<ServerStartRequest>)
-                -> std::result::Result<Response<ServerReply>, Status>
-            { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
-
-            async fn stop_server(&self, _: Request<ServerStopRequest>)
-                -> std::result::Result<Response<ServerReply>, Status>
-            { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
-
-            async fn delete_server(&self, _: Request<ServerDeleteRequest>)
-                -> std::result::Result<Response<ServerReply>, Status>
-            { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
-
-            async fn send_command(&self, _: Request<ServerCommandRequest>)
-                -> std::result::Result<Response<ServerReply>, Status>
-            { Ok(Response::new(ServerReply { success: true, message: "ok".into() })) }
-
-            async fn get_stats(&self, req: Request<ServerStatsRequest>)
-                -> std::result::Result<Response<ServerStats>, Status>
-            {
-                Ok(Response::new(ServerStats {
-                    server_id: req.into_inner().server_id,
-                    memory_bytes: 0, cpu_percent: 0.0, rx_bytes: 0, tx_bytes: 0,
+            async fn provision_server(
+                &self,
+                _: Request<ServerProvisionRequest>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
                 }))
             }
 
-            async fn stream_logs(&self, _: Request<ServerLogsRequest>)
-                -> std::result::Result<Response<Self::StreamLogsStream>, Status>
-            {
+            async fn start_server(
+                &self,
+                _: Request<ServerStartRequest>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
+            }
+
+            async fn stop_server(
+                &self,
+                _: Request<ServerStopRequest>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
+            }
+
+            async fn delete_server(
+                &self,
+                _: Request<ServerDeleteRequest>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
+            }
+
+            async fn send_command(
+                &self,
+                _: Request<ServerCommandRequest>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
+            }
+
+            async fn get_stats(
+                &self,
+                req: Request<ServerStatsRequest>,
+            ) -> std::result::Result<Response<ServerStats>, Status> {
+                Ok(Response::new(ServerStats {
+                    server_id: req.into_inner().server_id,
+                    memory_bytes: 0,
+                    cpu_percent: 0.0,
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                }))
+            }
+
+            async fn stream_logs(
+                &self,
+                _: Request<ServerLogsRequest>,
+            ) -> std::result::Result<Response<Self::StreamLogsStream>, Status> {
                 let (tx, rx) = tokio::sync::mpsc::channel(4);
                 tokio::spawn(async move {
-                    let _ = tx.send(Ok(LogLine {
-                        content: "hello\n".into(), stream: "stdout".into(), timestamp: 0,
-                    })).await;
-                    let _ = tx.send(Ok(LogLine {
-                        content: "world\n".into(), stream: "stdout".into(), timestamp: 0,
-                    })).await;
+                    let _ = tx
+                        .send(Ok(LogLine {
+                            content: "hello\n".into(),
+                            stream: "stdout".into(),
+                            timestamp: 0,
+                        }))
+                        .await;
+                    let _ = tx
+                        .send(Ok(LogLine {
+                            content: "world\n".into(),
+                            stream: "stdout".into(),
+                            timestamp: 0,
+                        }))
+                        .await;
                 });
                 Ok(Response::new(ReceiverStream::new(rx)))
             }
@@ -302,8 +386,8 @@ mod tests {
         let token = "log-token";
         let t = token.to_string();
         tokio::spawn(async move {
-            use oxy_node::interceptor::AuthInterceptor;
             use oxy_core::proto::node::node_service_server::NodeServiceServer;
+            use oxy_node::interceptor::AuthInterceptor;
             use tokio_stream::wrappers::TcpListenerStream;
             tonic::transport::Server::builder()
                 .add_service(NodeServiceServer::with_interceptor(

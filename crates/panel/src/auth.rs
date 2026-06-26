@@ -3,12 +3,8 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    async_trait,
-    extract::FromRequestParts,
-    http::request::Parts,
-    response::IntoResponse,
-    routing::post,
-    Json, Router,
+    async_trait, extract::FromRequestParts, http::request::Parts, response::IntoResponse,
+    routing::post, Json, Router,
 };
 use chrono::Utc;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
@@ -31,33 +27,35 @@ pub fn hash_password(password: &str) -> Result<String> {
 }
 
 pub fn verify_password(password: &str, hash: &str) -> bool {
-    PasswordHash::new(hash)
-        .ok()
-        .map_or(false, |h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok())
+    PasswordHash::new(hash).ok().map_or(false, |h| {
+        Argon2::default()
+            .verify_password(password.as_bytes(), &h)
+            .is_ok()
+    })
 }
 
 // ── JWT ───────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub:  String,
-    pub adm:  bool,
-    pub exp:  u64,
+    pub sub: String,
+    pub adm: bool,
+    pub exp: u64,
     pub kind: String,
 }
 
 pub fn encode_token(
-    user_id:  Uuid,
+    user_id: Uuid,
     is_admin: bool,
-    kind:     &str,
-    secret:   &str,
+    kind: &str,
+    secret: &str,
     ttl_secs: u64,
 ) -> Result<String> {
     let now = Utc::now().timestamp() as u64;
     let exp = now.saturating_sub(1).saturating_add(ttl_secs);
     let claims = Claims {
-        sub:  user_id.to_string(),
-        adm:  is_admin,
+        sub: user_id.to_string(),
+        adm: is_admin,
         exp,
         kind: kind.to_string(),
     };
@@ -88,7 +86,7 @@ pub fn decode_token(token: &str, secret: &str, expected_kind: &str) -> Result<Cl
 
 #[derive(Debug, Clone)]
 pub struct AuthUser {
-    pub id:       Uuid,
+    pub id: Uuid,
     pub is_admin: bool,
 }
 
@@ -106,14 +104,16 @@ impl FromRequestParts<AppState> for AuthUser {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or_else(|| {
-                PanelError::Unauthorized("missing Authorization header".to_string())
-                    .into_response()
+                PanelError::Unauthorized("missing Authorization header".to_string()).into_response()
             })?;
         let claims = decode_token(token, &state.jwt_secret, "access")
             .map_err(IntoResponse::into_response)?;
         let id = Uuid::parse_str(&claims.sub)
             .map_err(|_| PanelError::Unauthorized("invalid sub".to_string()).into_response())?;
-        Ok(AuthUser { id, is_admin: claims.adm })
+        Ok(AuthUser {
+            id,
+            is_admin: claims.adm,
+        })
     }
 }
 
@@ -140,21 +140,21 @@ impl FromRequestParts<AppState> for AdminUser {
 
 #[derive(Debug, Deserialize)]
 struct LoginRequest {
-    email:    String,
+    email: String,
     password: String,
 }
 
 #[derive(Debug, Serialize)]
 struct TokenResponse {
-    access_token:  String,
+    access_token: String,
     refresh_token: String,
 }
 
 #[derive(sqlx::FromRow)]
 struct UserRow {
-    id:            Uuid,
+    id: Uuid,
     password_hash: String,
-    is_admin:      bool,
+    is_admin: bool,
 }
 
 async fn login(
@@ -180,10 +180,13 @@ async fn login(
         return Err(PanelError::Unauthorized("invalid credentials".to_string()));
     }
 
-    let access_token  = encode_token(row.id, row.is_admin, "access",  &state.jwt_secret, 900)?;
+    let access_token = encode_token(row.id, row.is_admin, "access", &state.jwt_secret, 900)?;
     let refresh_token = encode_token(row.id, row.is_admin, "refresh", &state.jwt_secret, 604_800)?;
 
-    Ok(Json(TokenResponse { access_token, refresh_token }))
+    Ok(Json(TokenResponse {
+        access_token,
+        refresh_token,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,7 +212,7 @@ async fn refresh(
 
 pub fn auth_router() -> Router<AppState> {
     Router::new()
-        .route("/login",   post(login))
+        .route("/login", post(login))
         .route("/refresh", post(refresh))
 }
 
@@ -263,7 +266,10 @@ mod tests {
     use tower::ServiceExt;
 
     async fn make_state(pool: sqlx::PgPool) -> AppState {
-        AppState { db: pool, jwt_secret: SECRET.to_string() }
+        AppState {
+            db: pool,
+            jwt_secret: SECRET.to_string(),
+        }
     }
 
     #[sqlx::test(migrations = "./migrations")]

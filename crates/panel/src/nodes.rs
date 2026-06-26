@@ -16,25 +16,22 @@ use crate::{
 
 #[derive(Debug, sqlx::FromRow, Serialize, Clone)]
 pub struct Node {
-    pub id:         Uuid,
-    pub name:       String,
-    pub grpc_addr:  String,
+    pub id: Uuid,
+    pub name: String,
+    pub grpc_addr: String,
     #[serde(skip)]
-    pub token:      String,
+    pub token: String,
     pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateNodeRequest {
-    name:      String,
+    name: String,
     grpc_addr: String,
-    token:     String,
+    token: String,
 }
 
-async fn list_nodes(
-    State(state): State<AppState>,
-    _admin: AdminUser,
-) -> Result<Json<Vec<Node>>> {
+async fn list_nodes(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Vec<Node>>> {
     let nodes = sqlx::query_as::<_, Node>(
         "SELECT id, name, grpc_addr, token, created_at FROM nodes ORDER BY created_at",
     )
@@ -84,15 +81,21 @@ async fn delete_node(
 
 pub fn nodes_router() -> Router<AppState> {
     Router::new()
-        .route("/",    get(list_nodes).post(create_node))
+        .route("/", get(list_nodes).post(create_node))
         .route("/:id", delete(delete_node))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{auth::{encode_token, hash_password}, router, AppState};
-    use axum::{body::Body, http::{Request, StatusCode}};
+    use crate::{
+        auth::{encode_token, hash_password},
+        router, AppState,
+    };
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -100,7 +103,10 @@ mod tests {
     const SECRET: &str = "test-secret-at-least-32-chars-long!!";
 
     fn make_state(pool: sqlx::PgPool) -> AppState {
-        AppState { db: pool, jwt_secret: SECRET.to_string() }
+        AppState {
+            db: pool,
+            jwt_secret: SECRET.to_string(),
+        }
     }
 
     async fn seed_admin(pool: &sqlx::PgPool) -> String {
@@ -109,8 +115,13 @@ mod tests {
         sqlx::query(
             "INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)",
         )
-        .bind(id).bind("a@t.com").bind(&hash).bind(true)
-        .execute(pool).await.unwrap();
+        .bind(id)
+        .bind("a@t.com")
+        .bind(&hash)
+        .bind(true)
+        .execute(pool)
+        .await
+        .unwrap();
         encode_token(id, true, "access", SECRET, 900).unwrap()
     }
 
@@ -125,24 +136,31 @@ mod tests {
             "token": "secret-node-token"
         });
         let create_req = Request::builder()
-            .method("POST").uri("/api/nodes")
+            .method("POST")
+            .uri("/api/nodes")
             .header("authorization", format!("Bearer {}", token))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let res = app.clone().oneshot(create_req).await.unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
 
         let list_req = Request::builder()
-            .method("GET").uri("/api/nodes")
+            .method("GET")
+            .uri("/api/nodes")
             .header("authorization", format!("Bearer {}", token))
-            .body(Body::empty()).unwrap();
+            .body(Body::empty())
+            .unwrap();
         let res = app.oneshot(list_req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json.as_array().unwrap().len(), 1);
         assert_eq!(json[0]["name"], "node-eu-1");
-        assert!(json[0].get("token").is_none(), "token must not be serialized");
+        assert!(
+            json[0].get("token").is_none(),
+            "token must not be serialized"
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -152,14 +170,20 @@ mod tests {
         let node_id: Uuid = sqlx::query_scalar(
             "INSERT INTO nodes (name, grpc_addr, token) VALUES ($1, $2, $3) RETURNING id",
         )
-        .bind("n1").bind("http://localhost:8080").bind("tok")
-        .fetch_one(&pool).await.unwrap();
+        .bind("n1")
+        .bind("http://localhost:8080")
+        .bind("tok")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         let app = router(make_state(pool));
         let req = Request::builder()
-            .method("DELETE").uri(format!("/api/nodes/{}", node_id))
+            .method("DELETE")
+            .uri(format!("/api/nodes/{}", node_id))
             .header("authorization", format!("Bearer {}", token))
-            .body(Body::empty()).unwrap();
+            .body(Body::empty())
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
     }
