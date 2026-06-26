@@ -1,9 +1,9 @@
+use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use serde::Deserialize;
-use crate::api::sse::use_sse_callback;
+use wasm_bindgen_futures::spawn_local;
+use crate::api::client::ApiClient;
 use crate::state::SessionContext;
-
-const API_BASE: &str = "/api";
 
 #[derive(Clone, Deserialize)]
 struct Stats {
@@ -17,20 +17,20 @@ struct Stats {
 pub fn StatsTab(server_id: String) -> impl IntoView {
     let session = use_context::<SessionContext>().expect("SessionContext");
     let stats = RwSignal::new(None::<Stats>);
+    let running = RwSignal::new(true);
 
-    // use_sse_callback substitui o valor a cada tick — evita Vec crescendo linearmente.
-    // Chamado no escopo raiz do componente para que on_cleanup tenha Reactive Owner correto.
-    let url = format!(
-        "{}/servers/{}/stats?token={}",
-        API_BASE, server_id, session.token()
-    );
-    use_sse_callback(url, move |data| {
-        if let Ok(s) = serde_json::from_str::<Stats>(&data) {
-            stats.set(Some(s));
+    on_cleanup(move || running.set(false));
+
+    let tok = session.token();
+    let id = server_id.clone();
+    spawn_local(async move {
+        while running.get_untracked() {
+            if let Ok(s) = ApiClient::new(tok.clone()).get::<Stats>(&format!("/servers/{}/stats", id)).await {
+                stats.set(Some(s));
+            }
+            TimeoutFuture::new(3_000).await;
         }
     });
-
-    let stats = move || stats.get();
 
     fn fmt_mb(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / 1_048_576.0)
@@ -38,12 +38,12 @@ pub fn StatsTab(server_id: String) -> impl IntoView {
 
     view! {
         <Show
-            when=move || stats().is_some()
+            when=move || stats.get().is_some()
             fallback=|| view! {
                 <p class="text-gray-500 text-sm">"Waiting for stats..."</p>
             }
         >
-            {move || stats().map(|s| {
+            {move || stats.get().map(|s| {
                 view! {
                     <div class="grid grid-cols-2 gap-4">
                         <div class="bg-white p-4 rounded-lg shadow border">
