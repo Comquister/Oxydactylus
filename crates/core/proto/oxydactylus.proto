@@ -18,6 +18,8 @@ service NodeService {
     rpc RenameFile       (RenameFileRequest)      returns (ServerReply);
     rpc DownloadFile     (DownloadFileRequest)    returns (stream FileChunk);
     rpc UploadFile       (stream FileChunk)       returns (ServerReply);
+    rpc CreateBackup     (CreateBackupRequest)    returns (CreateBackupReply);
+    rpc DeleteBackup     (DeleteBackupRequest)    returns (ServerReply);
 }
 
 message ServerStartRequest  { string server_id = 1; }
@@ -126,4 +128,22 @@ message FileChunk {
     string server_id = 1;
     string path      = 2;
     bytes  chunk     = 3;
+}
+
+message CreateBackupRequest {
+    string          server_id     = 1;
+    string          backup_uuid   = 2;
+    repeated string ignored_files = 3;
+}
+
+message CreateBackupReply {
+    bool   success    = 1;
+    string message    = 2;
+    string sha256     = 3;
+    int64  bytes      = 4;
+}
+
+message DeleteBackupRequest {
+    string server_id    = 1;
+    string backup_uuid  = 2;
 }
