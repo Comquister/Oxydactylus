@@ -27,6 +27,7 @@ regex              = "1"
 aes-gcm            = "0.10"
 rand               = "0.8"
 hex                = "0.4"
+cron               = "0.12"
 
 [profile.release]
 opt-level     = 3
