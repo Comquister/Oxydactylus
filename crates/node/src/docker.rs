@@ -8,6 +8,7 @@ pub struct ContainerSpec {
     pub env:         Vec<String>,
     pub memory_mb:   i64,
     pub cpu_percent: i64,
+    pub ports:       Vec<String>,
 }
 
 pub struct ContainerStats {
@@ -30,6 +31,7 @@ pub trait DockerBackend: Send + Sync + 'static {
     async fn stop_container(&self, id: String, timeout: u32) -> Result<()>;
     async fn delete_container(&self, id: String) -> Result<()>;
     async fn send_command(&self, id: String, command: String) -> Result<()>;
+    async fn send_command_with_output(&self, id: String, command: String) -> Result<String>;
     async fn get_stats(&self, id: String) -> Result<ContainerStats>;
     async fn log_stream(&self, id: String, follow: bool)
         -> Result<BoxStream<'static, Result<LogChunk>>>;
@@ -51,12 +53,32 @@ impl BollardDocker {
 impl DockerBackend for BollardDocker {
     async fn create_container(&self, spec: ContainerSpec) -> Result<String> {
         use bollard::container::{Config, CreateContainerOptions};
-        use bollard::models::HostConfig;
+        use bollard::models::{HostConfig, PortBinding};
+        use std::collections::HashMap;
 
         if spec.memory_mb <= 0 || spec.cpu_percent <= 0 {
             return Err(NodeError::Validation(
                 "memory_mb and cpu_percent must be positive".into(),
             ));
+        }
+
+        let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+        for entry in &spec.ports {
+            let parts: Vec<&str> = entry.splitn(3, ':').collect();
+            let (host_ip, host_port, container_part) = match parts.as_slice() {
+                [ip, hp, cp] => (ip.to_string(), hp.to_string(), cp.to_string()),
+                [hp, cp]     => ("0.0.0.0".to_string(), hp.to_string(), cp.to_string()),
+                _            => continue,
+            };
+            let key = if container_part.contains('/') {
+                container_part
+            } else {
+                format!("{}/tcp", container_part)
+            };
+            port_bindings.insert(key, Some(vec![PortBinding {
+                host_ip:   Some(host_ip),
+                host_port: Some(host_port),
+            }]));
         }
 
         let opts = CreateContainerOptions {
@@ -69,8 +91,9 @@ impl DockerBackend for BollardDocker {
             open_stdin:  Some(true),
             stdin_once:  Some(false),
             host_config: Some(HostConfig {
-                memory:    Some(spec.memory_mb * 1024 * 1024),
-                nano_cpus: Some(spec.cpu_percent * 10_000_000),
+                memory:         Some(spec.memory_mb * 1024 * 1024),
+                nano_cpus:      Some(spec.cpu_percent * 10_000_000),
+                port_bindings:  Some(port_bindings),
                 ..Default::default()
             }),
             ..Default::default()
@@ -130,6 +153,43 @@ impl DockerBackend for BollardDocker {
             .flush()
             .await
             .map_err(|e| NodeError::Docker(e.to_string()))
+    }
+
+    async fn send_command_with_output(&self, id: String, command: String) -> Result<String> {
+        use bollard::container::AttachContainerOptions;
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        let mut attach = self.inner
+            .attach_container(&id, Some(AttachContainerOptions::<String> {
+                stdin:  Some(true),
+                stream: Some(true),
+                stdout: Some(true),
+                stderr: Some(true),
+                ..Default::default()
+            }))
+            .await
+            .map_err(NodeError::from)?;
+
+        let payload = format!("{}\n", command);
+        attach.input
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| NodeError::Docker(e.to_string()))?;
+        attach.input
+            .flush()
+            .await
+            .map_err(|e| NodeError::Docker(e.to_string()))?;
+
+        let mut output = String::new();
+        while let Some(msg) = attach.output.next().await {
+            match msg {
+                Ok(msg) => output.push_str(&msg.to_string()),
+                Err(e) => return Err(NodeError::Docker(e.to_string())),
+            }
+        }
+
+        Ok(output)
     }
 
     async fn get_stats(&self, id: String) -> Result<ContainerStats> {
@@ -232,6 +292,7 @@ mod tests {
             env:         vec!["PORT=25565".into()],
             memory_mb:   512,
             cpu_percent: 50,
+            ports:       vec![],
         }).await.unwrap();
 
         assert_eq!(id, "abc123");
@@ -279,6 +340,18 @@ mod tests {
             .returning(|_, _| async { Ok(()) }.boxed());
 
         mock.send_command("srv-1".into(), "say hello".into()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mock_send_command_with_output_returns_string() {
+        let mut mock = MockDockerBackend::new();
+        mock.expect_send_command_with_output()
+            .withf(|id, cmd| id == "srv-1" && cmd.contains("ls"))
+            .once()
+            .returning(|_, _| async { Ok("file1\nfile2\n".to_string()) }.boxed());
+
+        let output = mock.send_command_with_output("srv-1".into(), "ls /root".into()).await.unwrap();
+        assert_eq!(output, "file1\nfile2\n");
     }
 
     #[tokio::test]

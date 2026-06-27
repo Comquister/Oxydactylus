@@ -10,6 +10,16 @@ service NodeService {
     rpc StreamLogs       (ServerLogsRequest)      returns (stream LogLine);
     rpc SendCommand      (ServerCommandRequest)   returns (ServerReply);
     rpc ProvisionServer  (ServerProvisionRequest) returns (ServerReply);
+    rpc ListFiles        (ListFilesRequest)       returns (ListFilesReply);
+    rpc GetFileContents  (GetFileContentsRequest) returns (GetFileContentsReply);
+    rpc WriteFileContents (WriteFileContentsRequest) returns (ServerReply);
+    rpc CreateDirectory  (CreateDirectoryRequest) returns (ServerReply);
+    rpc DeleteFiles      (DeleteFilesRequest)     returns (ServerReply);
+    rpc RenameFile       (RenameFileRequest)      returns (ServerReply);
+    rpc DownloadFile     (DownloadFileRequest)    returns (stream FileChunk);
+    rpc UploadFile       (stream FileChunk)       returns (ServerReply);
+    rpc CreateBackup     (CreateBackupRequest)    returns (CreateBackupReply);
+    rpc DeleteBackup     (DeleteBackupRequest)    returns (ServerReply);
 }
 
 message ServerStartRequest  { string server_id = 1; }
@@ -56,4 +66,84 @@ message ServerProvisionRequest {
     uint32          memory_mb   = 3;
     uint32          cpu_percent = 4;
     repeated string env         = 5;
+    repeated string ports       = 6;
+}
+
+message ListFilesRequest {
+    string server_id = 1;
+    string path      = 2;
+}
+
+message FileInfo {
+    string name       = 1;
+    string path       = 2;
+    bool   is_dir     = 3;
+    int64  size_bytes = 4;
+    string mode       = 5;
+}
+
+message ListFilesReply {
+    repeated FileInfo files = 1;
+}
+
+message GetFileContentsRequest {
+    string server_id = 1;
+    string path      = 2;
+}
+
+message GetFileContentsReply {
+    bytes content = 1;
+}
+
+message WriteFileContentsRequest {
+    string server_id = 1;
+    string path      = 2;
+    bytes  content   = 3;
+}
+
+message CreateDirectoryRequest {
+    string server_id = 1;
+    string path      = 2;
+}
+
+message DeleteFilesRequest {
+    string server_id = 1;
+    string path      = 2;
+    bool   recursive = 3;
+}
+
+message RenameFileRequest {
+    string server_id = 1;
+    string old_path  = 2;
+    string new_path  = 3;
+}
+
+message DownloadFileRequest {
+    string server_id = 1;
+    string path      = 2;
+    uint32 chunk_size = 3;
+}
+
+message FileChunk {
+    string server_id = 1;
+    string path      = 2;
+    bytes  chunk     = 3;
+}
+
+message CreateBackupRequest {
+    string          server_id     = 1;
+    string          backup_uuid   = 2;
+    repeated string ignored_files = 3;
+}
+
+message CreateBackupReply {
+    bool   success    = 1;
+    string message    = 2;
+    string sha256     = 3;
+    int64  bytes      = 4;
+}
+
+message DeleteBackupRequest {
+    string server_id    = 1;
+    string backup_uuid  = 2;
 }

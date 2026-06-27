@@ -5,8 +5,12 @@ use axum::{
 use http_body_util::BodyExt;
 use oxy_core::proto::node::{
     node_service_server::{NodeService, NodeServiceServer},
-    LogLine, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest, ServerProvisionRequest,
+    CreateBackupReply, CreateBackupRequest, CreateDirectoryRequest, DeleteBackupRequest,
+    DeleteFilesRequest, DownloadFileRequest, FileChunk, GetFileContentsReply,
+    GetFileContentsRequest, ListFilesReply, ListFilesRequest, LogLine, RenameFileRequest,
+    ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest, ServerProvisionRequest,
     ServerReply, ServerStartRequest, ServerStats, ServerStatsRequest, ServerStopRequest,
+    WriteFileContentsRequest,
 };
 use oxy_panel::{
     auth::{encode_token, hash_password},
@@ -25,6 +29,8 @@ struct OkNode;
 #[async_trait]
 impl NodeService for OkNode {
     type StreamLogsStream = ReceiverStream<Result<LogLine, Status>>;
+    type DownloadFileStream = ReceiverStream<Result<FileChunk, Status>>;
+
     async fn provision_server(
         &self,
         _: GrpcRequest<ServerProvisionRequest>,
@@ -89,6 +95,90 @@ impl NodeService for OkNode {
         let (_, rx) = tokio::sync::mpsc::channel(1);
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+    async fn list_files(
+        &self,
+        _: GrpcRequest<ListFilesRequest>,
+    ) -> Result<Response<ListFilesReply>, Status> {
+        Ok(Response::new(ListFilesReply { files: vec![] }))
+    }
+    async fn get_file_contents(
+        &self,
+        _: GrpcRequest<GetFileContentsRequest>,
+    ) -> Result<Response<GetFileContentsReply>, Status> {
+        Ok(Response::new(GetFileContentsReply { content: vec![] }))
+    }
+    async fn write_file_contents(
+        &self,
+        _: GrpcRequest<WriteFileContentsRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
+    async fn create_directory(
+        &self,
+        _: GrpcRequest<CreateDirectoryRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
+    async fn delete_files(
+        &self,
+        _: GrpcRequest<DeleteFilesRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
+    async fn rename_file(
+        &self,
+        _: GrpcRequest<RenameFileRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
+    async fn download_file(
+        &self,
+        _: GrpcRequest<DownloadFileRequest>,
+    ) -> Result<Response<Self::DownloadFileStream>, Status> {
+        let (_, rx) = tokio::sync::mpsc::channel(1);
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+    async fn upload_file(
+        &self,
+        _: GrpcRequest<tonic::Streaming<FileChunk>>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
+    async fn create_backup(
+        &self,
+        _: GrpcRequest<CreateBackupRequest>,
+    ) -> Result<Response<CreateBackupReply>, Status> {
+        Ok(Response::new(CreateBackupReply {
+            success: true,
+            message: "ok".into(),
+            sha256: "abc123".into(),
+            bytes: 1000,
+        }))
+    }
+    async fn delete_backup(
+        &self,
+        _: GrpcRequest<DeleteBackupRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
 }
 
 async fn start_node(token: &str) -> String {
@@ -121,20 +211,28 @@ async fn full_panel_flow(pool: PgPool) {
     let node_addr = start_node("node-secret").await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
+    sqlx::any::install_default_drivers();
+    use sqlx::ConnectOptions;
+    let db_url = pool.connect_options().to_url_lossy().to_string();
+    let any_pool = sqlx::AnyPool::connect(&db_url).await.unwrap();
+
     let state = AppState {
-        db: pool.clone(),
+        db: any_pool,
+        db_backend: "PostgreSQL".to_string(),
         jwt_secret: SECRET.to_string(),
+        app_key: None,
     };
     let app = router(state);
 
     // 1. Create admin user
     let admin_id = Uuid::new_v4();
     let hash = hash_password("admin-pass").unwrap();
-    sqlx::query("INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)")
-        .bind(admin_id)
+    sqlx::query("INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)")
+        .bind(admin_id.to_string())
         .bind("admin@example.com")
         .bind(&hash)
         .bind(true)
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(&pool)
         .await
         .unwrap();
@@ -245,4 +343,37 @@ async fn full_panel_flow(pool: PgPool) {
 #[allow(dead_code)]
 fn _uses_auth_header() {
     let _ = auth_header(Uuid::new_v4(), true);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn schema_has_new_plan9_tables(pool: PgPool) {
+    let tables = vec![
+        "database_hosts",
+        "server_databases",
+        "schedules",
+        "schedule_tasks",
+        "backups",
+        "activity_logs",
+    ];
+
+    for table in tables {
+        let result: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1"
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .expect(&format!("Failed to query for table {}", table));
+
+        assert_eq!(result.0, 1, "Table {} does not exist", table);
+    }
+
+    let sftp_port_exists: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'nodes' AND column_name = 'sftp_port'"
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("Failed to query for sftp_port column");
+
+    assert_eq!(sftp_port_exists.0, 1, "Column sftp_port does not exist on nodes table");
 }

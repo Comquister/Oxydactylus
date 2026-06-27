@@ -14,7 +14,7 @@ use crate::{
     AppState,
 };
 
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Egg {
     pub id: Uuid,
     pub name: String,
@@ -29,6 +29,52 @@ pub struct Egg {
     pub startup_done: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for Egg {
+    fn from_row(row: &'r sqlx::any::AnyRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let id_str: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        let features_str: String = row.try_get("features")?;
+        let features: Vec<String> = serde_json::from_str(&features_str)
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        let file_denylist_str: String = row.try_get("file_denylist")?;
+        let file_denylist: Vec<String> = serde_json::from_str(&file_denylist_str)
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        let docker_images_str: String = row.try_get("docker_images")?;
+        let docker_images: serde_json::Value = serde_json::from_str(&docker_images_str)
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        let created_at_str: String = row.try_get("created_at")?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        let updated_at_str: String = row.try_get("updated_at")?;
+        let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        Ok(Self {
+            id,
+            name: row.try_get("name")?,
+            description: row.try_get("description")?,
+            author: row.try_get("author")?,
+            version: row.try_get("version")?,
+            features,
+            file_denylist,
+            docker_images,
+            start_cmd: row.try_get("start_cmd")?,
+            stop_cmd: row.try_get("stop_cmd")?,
+            startup_done: row.try_get("startup_done")?,
+            created_at,
+            updated_at,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,7 +109,7 @@ fn empty_object() -> serde_json::Value {
     serde_json::json!({})
 }
 
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct EggVariable {
     pub id: Uuid,
     pub egg_id: Uuid,
@@ -75,6 +121,28 @@ pub struct EggVariable {
     pub user_editable: bool,
     pub rules: Option<String>,
     pub field_type: String,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for EggVariable {
+    fn from_row(row: &'r sqlx::any::AnyRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let id_str: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let egg_id_str: String = row.try_get("egg_id")?;
+        let egg_id = Uuid::parse_str(&egg_id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        Ok(Self {
+            id,
+            egg_id,
+            name: row.try_get("name")?,
+            description: row.try_get("description")?,
+            env_variable: row.try_get("env_variable")?,
+            default_val: row.try_get("default_val")?,
+            user_viewable: row.try_get("user_viewable")?,
+            user_editable: row.try_get("user_editable")?,
+            rules: row.try_get("rules")?,
+            field_type: row.try_get("field_type")?,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,13 +170,30 @@ fn default_field_type() -> String {
     "text".to_string()
 }
 
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct InstallScript {
     pub id: Uuid,
     pub egg_id: Uuid,
     pub container: String,
     pub entrypoint: String,
     pub script: String,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for InstallScript {
+    fn from_row(row: &'r sqlx::any::AnyRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let id_str: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let egg_id_str: String = row.try_get("egg_id")?;
+        let egg_id = Uuid::parse_str(&egg_id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        Ok(Self {
+            id,
+            egg_id,
+            container: row.try_get("container")?,
+            entrypoint: row.try_get("entrypoint")?,
+            script: row.try_get("script")?,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,13 +208,33 @@ fn default_entrypoint() -> String {
     "bash".to_string()
 }
 
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ConfigFile {
     pub id: Uuid,
     pub egg_id: Uuid,
     pub path: String,
     pub parser: String,
     pub patches: serde_json::Value,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for ConfigFile {
+    fn from_row(row: &'r sqlx::any::AnyRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let id_str: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let egg_id_str: String = row.try_get("egg_id")?;
+        let egg_id = Uuid::parse_str(&egg_id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let patches_str: String = row.try_get("patches")?;
+        let patches: serde_json::Value = serde_json::from_str(&patches_str)
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        Ok(Self {
+            id,
+            egg_id,
+            path: row.try_get("path")?,
+            parser: row.try_get("parser")?,
+            patches,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,13 +245,15 @@ struct CreateConfigFileRequest {
 }
 
 async fn list_eggs(State(state): State<AppState>, _user: AuthUser) -> Result<Json<Vec<Egg>>> {
-    let eggs = sqlx::query_as::<_, Egg>(
+    let sql = crate::db::port_sql(
         "SELECT id, name, description, author, version, features, file_denylist,
                 docker_images, start_cmd, stop_cmd, startup_done, created_at, updated_at
          FROM eggs ORDER BY created_at",
-    )
-    .fetch_all(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let eggs = sqlx::query_as::<_, Egg>(&sql)
+        .fetch_all(&state.db)
+        .await?;
     Ok(Json(eggs))
 }
 
@@ -160,26 +267,33 @@ async fn create_egg(
             "name and start_cmd are required".into(),
         ));
     }
-    let egg = sqlx::query_as::<_, Egg>(
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let sql = crate::db::port_sql(
         "INSERT INTO eggs
-             (name, description, author, version, features, file_denylist,
-              docker_images, start_cmd, stop_cmd, startup_done)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             (id, name, description, author, version, features, file_denylist,
+              docker_images, start_cmd, stop_cmd, startup_done, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          RETURNING id, name, description, author, version, features, file_denylist,
                    docker_images, start_cmd, stop_cmd, startup_done, created_at, updated_at",
-    )
-    .bind(&body.name)
-    .bind(&body.description)
-    .bind(&body.author)
-    .bind(&body.version)
-    .bind(&body.features)
-    .bind(&body.file_denylist)
-    .bind(&body.docker_images)
-    .bind(&body.start_cmd)
-    .bind(&body.stop_cmd)
-    .bind(&body.startup_done)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let egg = sqlx::query_as::<_, Egg>(&sql)
+        .bind(&id)
+        .bind(&body.name)
+        .bind(&body.description)
+        .bind(&body.author)
+        .bind(&body.version)
+        .bind(serde_json::to_string(&body.features).unwrap())
+        .bind(serde_json::to_string(&body.file_denylist).unwrap())
+        .bind(serde_json::to_string(&body.docker_images).unwrap())
+        .bind(&body.start_cmd)
+        .bind(&body.stop_cmd)
+        .bind(&body.startup_done)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(&state.db)
+        .await?;
     Ok((StatusCode::CREATED, Json(egg)))
 }
 
@@ -188,14 +302,16 @@ async fn get_egg(
     _user: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Egg>> {
-    let egg = sqlx::query_as::<_, Egg>(
+    let sql = crate::db::port_sql(
         "SELECT id, name, description, author, version, features, file_denylist,
                 docker_images, start_cmd, stop_cmd, startup_done, created_at, updated_at
          FROM eggs WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let egg = sqlx::query_as::<_, Egg>(&sql)
+        .bind(id.to_string())
+        .fetch_one(&state.db)
+        .await?;
     Ok(Json(egg))
 }
 
@@ -204,8 +320,12 @@ async fn delete_egg(
     _admin: AdminUser,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
-    let rows = sqlx::query("DELETE FROM eggs WHERE id = $1")
-        .bind(id)
+    let sql = crate::db::port_sql(
+        "DELETE FROM eggs WHERE id = $1",
+        &state.db_backend,
+    );
+    let rows = sqlx::query(&sql)
+        .bind(id.to_string())
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -220,14 +340,16 @@ async fn list_variables(
     _user: AuthUser,
     Path(egg_id): Path<Uuid>,
 ) -> Result<Json<Vec<EggVariable>>> {
-    let vars = sqlx::query_as::<_, EggVariable>(
+    let sql = crate::db::port_sql(
         "SELECT id, egg_id, name, description, env_variable, default_val,
                 user_viewable, user_editable, rules, field_type
          FROM egg_variables WHERE egg_id = $1 ORDER BY name",
-    )
-    .bind(egg_id)
-    .fetch_all(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let vars = sqlx::query_as::<_, EggVariable>(&sql)
+        .bind(egg_id.to_string())
+        .fetch_all(&state.db)
+        .await?;
     Ok(Json(vars))
 }
 
@@ -237,25 +359,29 @@ async fn create_variable(
     Path(egg_id): Path<Uuid>,
     Json(body): Json<CreateVariableRequest>,
 ) -> Result<(StatusCode, Json<EggVariable>)> {
-    let var = sqlx::query_as::<_, EggVariable>(
+    let id = Uuid::new_v4().to_string();
+    let sql = crate::db::port_sql(
         "INSERT INTO egg_variables
-             (egg_id, name, description, env_variable, default_val,
+             (id, egg_id, name, description, env_variable, default_val,
               user_viewable, user_editable, rules, field_type)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          RETURNING id, egg_id, name, description, env_variable, default_val,
                    user_viewable, user_editable, rules, field_type",
-    )
-    .bind(egg_id)
-    .bind(&body.name)
-    .bind(&body.description)
-    .bind(&body.env_variable)
-    .bind(&body.default_val)
-    .bind(body.user_viewable)
-    .bind(body.user_editable)
-    .bind(&body.rules)
-    .bind(&body.field_type)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let var = sqlx::query_as::<_, EggVariable>(&sql)
+        .bind(&id)
+        .bind(egg_id.to_string())
+        .bind(&body.name)
+        .bind(&body.description)
+        .bind(&body.env_variable)
+        .bind(&body.default_val)
+        .bind(body.user_viewable)
+        .bind(body.user_editable)
+        .bind(&body.rules)
+        .bind(&body.field_type)
+        .fetch_one(&state.db)
+        .await?;
     Ok((StatusCode::CREATED, Json(var)))
 }
 
@@ -264,9 +390,13 @@ async fn delete_variable(
     _admin: AdminUser,
     Path((egg_id, var_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode> {
-    let rows = sqlx::query("DELETE FROM egg_variables WHERE id = $1 AND egg_id = $2")
-        .bind(var_id)
-        .bind(egg_id)
+    let sql = crate::db::port_sql(
+        "DELETE FROM egg_variables WHERE id = $1 AND egg_id = $2",
+        &state.db_backend,
+    );
+    let rows = sqlx::query(&sql)
+        .bind(var_id.to_string())
+        .bind(egg_id.to_string())
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -281,13 +411,15 @@ async fn get_install_script(
     _user: AuthUser,
     Path(egg_id): Path<Uuid>,
 ) -> Result<Json<InstallScript>> {
-    let script = sqlx::query_as::<_, InstallScript>(
+    let sql = crate::db::port_sql(
         "SELECT id, egg_id, container, entrypoint, script
          FROM egg_install_scripts WHERE egg_id = $1",
-    )
-    .bind(egg_id)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let script = sqlx::query_as::<_, InstallScript>(&sql)
+        .bind(egg_id.to_string())
+        .fetch_one(&state.db)
+        .await?;
     Ok(Json(script))
 }
 
@@ -297,19 +429,23 @@ async fn upsert_install_script(
     Path(egg_id): Path<Uuid>,
     Json(body): Json<UpsertInstallScriptRequest>,
 ) -> Result<Json<InstallScript>> {
-    let script = sqlx::query_as::<_, InstallScript>(
-        "INSERT INTO egg_install_scripts (egg_id, container, entrypoint, script)
-         VALUES ($1,$2,$3,$4)
+    let id = Uuid::new_v4().to_string();
+    let sql = crate::db::port_sql(
+        "INSERT INTO egg_install_scripts (id, egg_id, container, entrypoint, script)
+         VALUES ($1,$2,$3,$4,$5)
          ON CONFLICT (egg_id)
-         DO UPDATE SET container=$2, entrypoint=$3, script=$4
+         DO UPDATE SET container=$3, entrypoint=$4, script=$5
          RETURNING id, egg_id, container, entrypoint, script",
-    )
-    .bind(egg_id)
-    .bind(&body.container)
-    .bind(&body.entrypoint)
-    .bind(&body.script)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let script = sqlx::query_as::<_, InstallScript>(&sql)
+        .bind(&id)
+        .bind(egg_id.to_string())
+        .bind(&body.container)
+        .bind(&body.entrypoint)
+        .bind(&body.script)
+        .fetch_one(&state.db)
+        .await?;
     Ok(Json(script))
 }
 
@@ -318,13 +454,15 @@ async fn list_config_files(
     _user: AuthUser,
     Path(egg_id): Path<Uuid>,
 ) -> Result<Json<Vec<ConfigFile>>> {
-    let cfs = sqlx::query_as::<_, ConfigFile>(
+    let sql = crate::db::port_sql(
         "SELECT id, egg_id, path, parser, patches
          FROM egg_config_files WHERE egg_id = $1 ORDER BY path",
-    )
-    .bind(egg_id)
-    .fetch_all(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let cfs = sqlx::query_as::<_, ConfigFile>(&sql)
+        .bind(egg_id.to_string())
+        .fetch_all(&state.db)
+        .await?;
     Ok(Json(cfs))
 }
 
@@ -341,17 +479,21 @@ async fn create_config_file(
             valid_parsers.join(", ")
         )));
     }
-    let cf = sqlx::query_as::<_, ConfigFile>(
-        "INSERT INTO egg_config_files (egg_id, path, parser, patches)
-         VALUES ($1,$2,$3,$4)
+    let id = Uuid::new_v4().to_string();
+    let sql = crate::db::port_sql(
+        "INSERT INTO egg_config_files (id, egg_id, path, parser, patches)
+         VALUES ($1,$2,$3,$4,$5)
          RETURNING id, egg_id, path, parser, patches",
-    )
-    .bind(egg_id)
-    .bind(&body.path)
-    .bind(&body.parser)
-    .bind(&body.patches)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let cf = sqlx::query_as::<_, ConfigFile>(&sql)
+        .bind(&id)
+        .bind(egg_id.to_string())
+        .bind(&body.path)
+        .bind(&body.parser)
+        .bind(serde_json::to_string(&body.patches).unwrap())
+        .fetch_one(&state.db)
+        .await?;
     Ok((StatusCode::CREATED, Json(cf)))
 }
 
@@ -360,9 +502,13 @@ async fn delete_config_file(
     _admin: AdminUser,
     Path((egg_id, cf_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode> {
-    let rows = sqlx::query("DELETE FROM egg_config_files WHERE id = $1 AND egg_id = $2")
-        .bind(cf_id)
-        .bind(egg_id)
+    let sql = crate::db::port_sql(
+        "DELETE FROM egg_config_files WHERE id = $1 AND egg_id = $2",
+        &state.db_backend,
+    );
+    let rows = sqlx::query(&sql)
+        .bind(cf_id.to_string())
+        .bind(egg_id.to_string())
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -453,60 +599,75 @@ async fn import_egg(
         body.docker_images
     };
 
-    let egg = sqlx::query_as::<_, Egg>(
+    let egg_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let sql = crate::db::port_sql(
         "INSERT INTO eggs
-             (name, description, author, features, file_denylist,
-              docker_images, start_cmd, stop_cmd, startup_done)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             (id, name, description, author, features, file_denylist,
+              docker_images, start_cmd, stop_cmd, startup_done, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          RETURNING id, name, description, author, version, features, file_denylist,
                    docker_images, start_cmd, stop_cmd, startup_done, created_at, updated_at",
-    )
-    .bind(&body.name)
-    .bind(&body.description)
-    .bind(&body.author)
-    .bind(&body.features)
-    .bind(&body.file_denylist)
-    .bind(&docker_images)
-    .bind(&body.startup)
-    .bind(&body.config.stop)
-    .bind(&body.config.startup.done)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let egg = sqlx::query_as::<_, Egg>(&sql)
+        .bind(&egg_id)
+        .bind(&body.name)
+        .bind(&body.description)
+        .bind(&body.author)
+        .bind(serde_json::to_string(&body.features).unwrap())
+        .bind(serde_json::to_string(&body.file_denylist).unwrap())
+        .bind(serde_json::to_string(&docker_images).unwrap())
+        .bind(&body.startup)
+        .bind(&body.config.stop)
+        .bind(&body.config.startup.done)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(&state.db)
+        .await?;
 
     for var in &body.variables {
-        sqlx::query(
+        let var_id = Uuid::new_v4().to_string();
+        let sql = crate::db::port_sql(
             "INSERT INTO egg_variables
-                 (egg_id, name, description, env_variable, default_val,
-                  user_viewable, user_editable, rules, field_type)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-        )
-        .bind(egg.id)
-        .bind(&var.name)
-        .bind(&var.description)
-        .bind(&var.env_variable)
-        .bind(&var.default_value)
-        .bind(var.user_viewable)
-        .bind(var.user_editable)
-        .bind(&var.rules)
-        .bind(&var.field_type)
-        .execute(&state.db)
-        .await?;
+                  (id, egg_id, name, description, env_variable, default_val,
+                   user_viewable, user_editable, rules, field_type)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            &state.db_backend,
+        );
+        sqlx::query(&sql)
+            .bind(&var_id)
+            .bind(egg.id.to_string())
+            .bind(&var.name)
+            .bind(&var.description)
+            .bind(&var.env_variable)
+            .bind(&var.default_value)
+            .bind(var.user_viewable)
+            .bind(var.user_editable)
+            .bind(&var.rules)
+            .bind(&var.field_type)
+            .execute(&state.db)
+            .await?;
     }
 
     if let Some(scripts) = &body.scripts {
         if let Some(install) = &scripts.installation {
-            sqlx::query(
-                "INSERT INTO egg_install_scripts (egg_id, container, entrypoint, script)
-                 VALUES ($1,$2,$3,$4)
+            let script_id = Uuid::new_v4().to_string();
+            let sql = crate::db::port_sql(
+                "INSERT INTO egg_install_scripts (id, egg_id, container, entrypoint, script)
+                 VALUES ($1,$2,$3,$4,$5)
                  ON CONFLICT (egg_id) DO UPDATE
-                 SET container=$2, entrypoint=$3, script=$4",
-            )
-            .bind(egg.id)
-            .bind(&install.container)
-            .bind(&install.entrypoint)
-            .bind(&install.script)
-            .execute(&state.db)
-            .await?;
+                 SET container=$3, entrypoint=$4, script=$5",
+                &state.db_backend,
+            );
+            sqlx::query(&sql)
+                .bind(&script_id)
+                .bind(egg.id.to_string())
+                .bind(&install.container)
+                .bind(&install.entrypoint)
+                .bind(&install.script)
+                .execute(&state.db)
+                .await?;
         }
     }
 
@@ -523,39 +684,47 @@ async fn export_egg_toml(
     _user: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<AxumResponse> {
-    let egg = sqlx::query_as::<_, Egg>(
+    let sql_egg = crate::db::port_sql(
         "SELECT id, name, description, author, version, features, file_denylist,
                 docker_images, start_cmd, stop_cmd, startup_done, created_at, updated_at
          FROM eggs WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let egg = sqlx::query_as::<_, Egg>(&sql_egg)
+        .bind(id.to_string())
+        .fetch_one(&state.db)
+        .await?;
 
-    let vars = sqlx::query_as::<_, EggVariable>(
+    let sql_vars = crate::db::port_sql(
         "SELECT id, egg_id, name, description, env_variable, default_val,
                 user_viewable, user_editable, rules, field_type
          FROM egg_variables WHERE egg_id = $1 ORDER BY name",
-    )
-    .bind(id)
-    .fetch_all(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let vars = sqlx::query_as::<_, EggVariable>(&sql_vars)
+        .bind(id.to_string())
+        .fetch_all(&state.db)
+        .await?;
 
-    let install = sqlx::query_as::<_, InstallScript>(
+    let sql_install = crate::db::port_sql(
         "SELECT id, egg_id, container, entrypoint, script
          FROM egg_install_scripts WHERE egg_id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let install = sqlx::query_as::<_, InstallScript>(&sql_install)
+        .bind(id.to_string())
+        .fetch_optional(&state.db)
+        .await?;
 
-    let cfs = sqlx::query_as::<_, ConfigFile>(
+    let sql_cfs = crate::db::port_sql(
         "SELECT id, egg_id, path, parser, patches
          FROM egg_config_files WHERE egg_id = $1 ORDER BY path",
-    )
-    .bind(id)
-    .fetch_all(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let cfs = sqlx::query_as::<_, ConfigFile>(&sql_cfs)
+        .bind(id.to_string())
+        .fetch_all(&state.db)
+        .await?;
 
     let toml_str = build_egg_toml(&egg, &vars, install.as_ref(), &cfs)
         .map_err(|e| PanelError::Internal(e.to_string()))?;
@@ -737,10 +906,16 @@ mod tests {
 
     const SECRET: &str = "test-secret-at-least-32-chars-long!!";
 
-    fn make_state(pool: sqlx::PgPool) -> AppState {
+    async fn make_state(pool: sqlx::PgPool) -> AppState {
+        use sqlx::ConnectOptions;
+        sqlx::any::install_default_drivers();
+        let db_url = pool.connect_options().to_url_lossy().to_string();
+        let any_pool = sqlx::AnyPool::connect(&db_url).await.unwrap();
         AppState {
-            db: pool,
+            db: any_pool,
+            db_backend: "PostgreSQL".to_string(),
             jwt_secret: SECRET.to_string(),
+            app_key: None,
         }
     }
 
@@ -748,12 +923,13 @@ mod tests {
         let id = Uuid::new_v4();
         let hash = hash_password("pass").unwrap();
         sqlx::query(
-            "INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)",
         )
-        .bind(id)
+        .bind(id.to_string())
         .bind("a@t.com")
         .bind(&hash)
         .bind(true)
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(pool)
         .await
         .unwrap();
@@ -763,7 +939,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn list_eggs_empty(pool: sqlx::PgPool) {
         let token = seed_admin(&pool).await;
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("GET")
             .uri("/api/eggs")
@@ -780,7 +956,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn create_and_get_egg(pool: sqlx::PgPool) {
         let token = seed_admin(&pool).await;
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "name": "Purpur",
             "start_cmd": "java -jar server.jar",
@@ -825,17 +1001,21 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn delete_egg(pool: sqlx::PgPool) {
         let token = seed_admin(&pool).await;
-        let egg_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO eggs (name, start_cmd, docker_images) VALUES ($1, $2, $3) RETURNING id",
+        let egg_id_str: String = sqlx::query_scalar(
+            "INSERT INTO eggs (id, name, start_cmd, docker_images, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("test-egg")
         .bind("./run.sh")
-        .bind(serde_json::json!({}))
+        .bind(serde_json::to_string(&serde_json::json!({})).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let egg_id = Uuid::parse_str(&egg_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let res = app
             .oneshot(
                 Request::builder()
@@ -853,17 +1033,21 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn add_and_list_variables(pool: sqlx::PgPool) {
         let token = seed_admin(&pool).await;
-        let egg_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO eggs (name, start_cmd, docker_images) VALUES ($1, $2, $3) RETURNING id",
+        let egg_id_str: String = sqlx::query_scalar(
+            "INSERT INTO eggs (id, name, start_cmd, docker_images, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("e")
         .bind("./run")
-        .bind(serde_json::json!({}))
+        .bind(serde_json::to_string(&serde_json::json!({})).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let egg_id = Uuid::parse_str(&egg_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "name": "Memory",
             "env_variable": "MEMORY_MB",
@@ -906,17 +1090,21 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn set_and_get_install_script(pool: sqlx::PgPool) {
         let token = seed_admin(&pool).await;
-        let egg_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO eggs (name, start_cmd, docker_images) VALUES ($1, $2, $3) RETURNING id",
+        let egg_id_str: String = sqlx::query_scalar(
+            "INSERT INTO eggs (id, name, start_cmd, docker_images, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("e")
         .bind("./run")
-        .bind(serde_json::json!({}))
+        .bind(serde_json::to_string(&serde_json::json!({})).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let egg_id = Uuid::parse_str(&egg_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "container": "ghcr.io/ptero-eggs/installers:alpine",
             "entrypoint": "ash",
@@ -957,17 +1145,21 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn add_and_list_config_files(pool: sqlx::PgPool) {
         let token = seed_admin(&pool).await;
-        let egg_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO eggs (name, start_cmd, docker_images) VALUES ($1, $2, $3) RETURNING id",
+        let egg_id_str: String = sqlx::query_scalar(
+            "INSERT INTO eggs (id, name, start_cmd, docker_images, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("e")
         .bind("./run")
-        .bind(serde_json::json!({}))
+        .bind(serde_json::to_string(&serde_json::json!({})).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let egg_id = Uuid::parse_str(&egg_id_str).unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "path": "server.properties",
             "parser": "properties",
@@ -1009,7 +1201,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn import_ptdl_v2(pool: sqlx::PgPool) {
         let token = seed_admin(&pool).await;
-        let app = router(make_state(pool.clone()));
+        let app = router(make_state(pool.clone()).await);
 
         let ptdl = serde_json::json!({
             "name": "Purpur",
@@ -1067,7 +1259,7 @@ mod tests {
         // variable was imported
         let var_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM egg_variables WHERE egg_id = $1")
-                .bind(Uuid::parse_str(egg["id"].as_str().unwrap()).unwrap())
+                .bind(egg["id"].as_str().unwrap().to_string())
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -1077,24 +1269,29 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn export_toml_roundtrip(pool: sqlx::PgPool) {
         let token = seed_admin(&pool).await;
-        let egg_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO eggs (name, start_cmd, stop_cmd, docker_images, startup_done)
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        let egg_id_str: String = sqlx::query_scalar(
+            "INSERT INTO eggs (id, name, start_cmd, stop_cmd, docker_images, startup_done, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("TestEgg")
         .bind("./run")
         .bind("stop")
-        .bind(serde_json::json!({"Java 21": "ghcr.io/test:java_21"}))
+        .bind(serde_json::to_string(&serde_json::json!({"Java 21": "ghcr.io/test:java_21"})).unwrap())
         .bind("Server started")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let egg_id = Uuid::parse_str(&egg_id_str).unwrap();
 
         sqlx::query(
-            "INSERT INTO egg_variables (egg_id, name, env_variable, default_val, rules, field_type)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO egg_variables (id, egg_id, name, env_variable, default_val, rules, field_type)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
-        .bind(egg_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(egg_id.to_string())
         .bind("Port")
         .bind("PORT")
         .bind("25565")
@@ -1104,7 +1301,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let res = app
             .oneshot(
                 Request::builder()

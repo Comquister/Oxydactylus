@@ -1,7 +1,10 @@
+pub mod backups;
 pub mod docker;
 pub mod error;
+pub mod files;
 pub mod interceptor;
 pub mod server;
+pub mod sftp;
 pub mod stream;
 
 use std::sync::Arc;
@@ -24,6 +27,17 @@ pub async fn run(config: NodeConfig) -> oxy_core::Result<()> {
     let service = NodeServiceImpl::new(Arc::new(docker));
 
     tracing::info!(listen = %config.grpc_listen, "node starting");
+
+    let sftp_config = config.clone();
+    tokio::spawn(async move {
+        let sftp_addr = format!("0.0.0.0:{}", sftp_config.sftp_port)
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
+        let sftp_server = sftp::SftpServer::new(sftp_config.panel_addr);
+        if let Err(e) = sftp_server.run(sftp_addr).await {
+            tracing::error!(error = %e, "sftp server error");
+        }
+    });
 
     tonic::transport::Server::builder()
         .add_service(NodeServiceServer::with_interceptor(service, interceptor))

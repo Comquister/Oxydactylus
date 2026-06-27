@@ -82,6 +82,20 @@ pub fn decode_token(token: &str, secret: &str, expected_kind: &str) -> Result<Cl
     Ok(data.claims)
 }
 
+// ── Node Token Auth ──────────────────────────────────────────────────────────
+
+async fn valid_node_token(db: &sqlx::AnyPool, token: &str) -> Result<()> {
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM nodes WHERE token = $1")
+        .bind(token)
+        .fetch_optional(db)
+        .await?;
+
+    if exists.is_none() {
+        return Err(PanelError::Unauthorized("invalid credentials".to_string()));
+    }
+    Ok(())
+}
+
 // ── Extractors ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -157,12 +171,25 @@ struct TokenResponse {
     is_admin: bool,
 }
 
-#[derive(sqlx::FromRow)]
 struct UserRow {
     id: Uuid,
     email: String,
     password_hash: String,
     is_admin: bool,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for UserRow {
+    fn from_row(row: &'r sqlx::any::AnyRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let id_str: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        Ok(Self {
+            id,
+            email: row.try_get("email")?,
+            password_hash: row.try_get("password_hash")?,
+            is_admin: row.try_get("is_admin")?,
+        })
+    }
 }
 
 async fn login(
@@ -220,10 +247,79 @@ async fn refresh(
     Ok(Json(AccessTokenResponse { access_token }))
 }
 
+#[derive(Debug, Deserialize)]
+struct SftpVerifyRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SftpVerifyResponse {
+    server_id: String,
+}
+
+async fn sftp_verify(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<SftpVerifyRequest>,
+) -> std::result::Result<Json<SftpVerifyResponse>, PanelError> {
+    // Extract and validate node token from Authorization header
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| PanelError::Unauthorized("invalid credentials".to_string()))?;
+
+    valid_node_token(&state.db, token).await?;
+
+    let (email, server_id_str) = body.username.split_once('.').ok_or_else(|| {
+        PanelError::Unauthorized("invalid credentials".to_string())
+    })?;
+
+    let server_id = Uuid::parse_str(server_id_str)
+        .map_err(|_| PanelError::Unauthorized("invalid credentials".to_string()))?;
+
+    let row: Option<UserRow> = sqlx::query_as::<_, UserRow>(
+        "SELECT id, email, password_hash, is_admin FROM users WHERE email = $1",
+    )
+    .bind(email)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let row = row.ok_or_else(|| PanelError::Unauthorized("invalid credentials".to_string()))?;
+
+    let password = body.password.clone();
+    let hash = row.password_hash.clone();
+    let valid = tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+        .await
+        .map_err(|e| PanelError::Internal(e.to_string()))?;
+
+    if !valid {
+        return Err(PanelError::Unauthorized("invalid credentials".to_string()));
+    }
+
+    let server_exists: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM servers WHERE id = $1 AND user_id = $2",
+    )
+    .bind(server_id.to_string())
+    .bind(row.id.to_string())
+    .fetch_optional(&state.db)
+    .await?;
+
+    if server_exists.is_none() {
+        return Err(PanelError::Unauthorized("invalid credentials".to_string()));
+    }
+
+    Ok(Json(SftpVerifyResponse {
+        server_id: server_id.to_string(),
+    }))
+}
+
 pub fn auth_router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
         .route("/refresh", post(refresh))
+        .route("/sftp-verify", post(sftp_verify))
 }
 
 #[cfg(test)]
@@ -276,9 +372,15 @@ mod tests {
     use tower::ServiceExt;
 
     async fn make_state(pool: sqlx::PgPool) -> AppState {
+        use sqlx::ConnectOptions;
+        sqlx::any::install_default_drivers();
+        let db_url = pool.connect_options().to_url_lossy().to_string();
+        let any_pool = sqlx::AnyPool::connect(&db_url).await.unwrap();
         AppState {
-            db: pool,
+            db: any_pool,
+            db_backend: "PostgreSQL".to_string(),
             jwt_secret: SECRET.to_string(),
+            app_key: None,
         }
     }
 
@@ -286,10 +388,12 @@ mod tests {
     async fn login_with_valid_credentials_returns_tokens(pool: sqlx::PgPool) {
         let state = make_state(pool.clone()).await;
         let hash = hash_password("password123").unwrap();
-        sqlx::query("INSERT INTO users (email, password_hash, is_admin) VALUES ($1, $2, $3)")
+        sqlx::query("INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)")
+            .bind(Uuid::new_v4().to_string())
             .bind("admin@example.com")
             .bind(&hash)
             .bind(true)
+            .bind(chrono::Utc::now().to_rfc3339())
             .execute(&pool)
             .await
             .unwrap();
@@ -318,10 +422,12 @@ mod tests {
     async fn login_with_wrong_password_returns_401(pool: sqlx::PgPool) {
         let state = make_state(pool.clone()).await;
         let hash = hash_password("correct").unwrap();
-        sqlx::query("INSERT INTO users (email, password_hash, is_admin) VALUES ($1, $2, $3)")
+        sqlx::query("INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)")
+            .bind(Uuid::new_v4().to_string())
             .bind("user@example.com")
             .bind(&hash)
             .bind(false)
+            .bind(chrono::Utc::now().to_rfc3339())
             .execute(&pool)
             .await
             .unwrap();
@@ -343,15 +449,18 @@ mod tests {
     async fn auth_via_query_token_param(pool: sqlx::PgPool) {
         let state = make_state(pool.clone()).await;
         let hash = hash_password("pass").unwrap();
-        let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (email, password_hash, is_admin) VALUES ($1,$2,$3) RETURNING id",
+        let user_id_str: String = sqlx::query_scalar(
+            "INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1,$2,$3,$4,$5) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("q@example.com")
         .bind(&hash)
         .bind(false)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(&pool)
         .await
         .unwrap();
+        let user_id = Uuid::parse_str(&user_id_str).unwrap();
 
         let token = encode_token(user_id, false, "access", SECRET, 900).unwrap();
 
@@ -364,5 +473,128 @@ mod tests {
 
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), axum::http::StatusCode::OK);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn sftp_verify_requires_node_token(pool: sqlx::PgPool) {
+        let state = make_state(pool.clone()).await;
+        let hash = hash_password("password").unwrap();
+        let user_id = Uuid::new_v4();
+        let server_id = Uuid::new_v4();
+
+        sqlx::query("INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)")
+            .bind(user_id.to_string())
+            .bind("user@example.com")
+            .bind(&hash)
+            .bind(false)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+            .bind(server_id.to_string())
+            .bind(user_id.to_string())
+            .bind("node-1")
+            .bind("test-server")
+            .bind("image:latest")
+            .bind(1024)
+            .bind(50)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = crate::router(state);
+        let body = serde_json::json!({ "username": format!("user@example.com.{}", server_id), "password": "password" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/sftp-verify")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn sftp_verify_returns_identical_error_for_all_failures(pool: sqlx::PgPool) {
+        let state = make_state(pool.clone()).await;
+        let hash = hash_password("password").unwrap();
+        let user_id = Uuid::new_v4();
+        let server_id = Uuid::new_v4();
+        let node_token = "valid-node-token";
+
+        sqlx::query("INSERT INTO nodes (id, name, grpc_addr, token, created_at) VALUES ($1, $2, $3, $4, $5)")
+            .bind("node-1")
+            .bind("test-node")
+            .bind("127.0.0.1:50051")
+            .bind(node_token)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)")
+            .bind(user_id.to_string())
+            .bind("user@example.com")
+            .bind(&hash)
+            .bind(false)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+            .bind(server_id.to_string())
+            .bind(user_id.to_string())
+            .bind("node-1")
+            .bind("test-server")
+            .bind("image:latest")
+            .bind(1024)
+            .bind(50)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = crate::router(state);
+
+        // Test 1: Wrong password
+        let body = serde_json::json!({ "username": format!("user@example.com.{}", server_id), "password": "wrongpwd" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/sftp-verify")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", node_token))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::UNAUTHORIZED);
+
+        // Test 2: Server doesn't exist (owned by different user)
+        let other_user_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1, $2, $3, $4, $5)")
+            .bind(other_user_id.to_string())
+            .bind("other@example.com")
+            .bind(&hash)
+            .bind(false)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let fake_server_id = Uuid::new_v4();
+        let body = serde_json::json!({ "username": format!("user@example.com.{}", fake_server_id), "password": "password" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/sftp-verify")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", node_token))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 }

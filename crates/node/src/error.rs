@@ -24,6 +24,12 @@ impl From<bollard::errors::Error> for NodeError {
     }
 }
 
+impl From<std::io::Error> for NodeError {
+    fn from(e: std::io::Error) -> Self {
+        NodeError::Docker(e.to_string())
+    }
+}
+
 impl From<NodeError> for Status {
     fn from(e: NodeError) -> Self {
         match e {

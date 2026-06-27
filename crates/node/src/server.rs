@@ -5,12 +5,16 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use oxy_core::proto::node::{
     node_service_server::NodeService,
-    LogLine, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest,
-    ServerProvisionRequest, ServerReply, ServerStartRequest, ServerStats,
-    ServerStatsRequest, ServerStopRequest,
+    CreateBackupReply, CreateBackupRequest, CreateDirectoryRequest, DeleteBackupRequest,
+    DeleteFilesRequest, DownloadFileRequest, FileChunk, FileInfo,
+    GetFileContentsReply, GetFileContentsRequest, ListFilesReply, ListFilesRequest,
+    LogLine, RenameFileRequest, ServerCommandRequest, ServerDeleteRequest,
+    ServerLogsRequest, ServerProvisionRequest, ServerReply, ServerStartRequest,
+    ServerStats, ServerStatsRequest, ServerStopRequest, WriteFileContentsRequest,
 };
 use crate::docker::DockerBackend;
 use crate::stream::forward_logs;
+use uuid::Uuid;
 
 pub struct NodeServiceImpl<B: DockerBackend> {
     docker: Arc<B>,
@@ -29,6 +33,7 @@ impl<B: DockerBackend> NodeServiceImpl<B> {
 #[async_trait]
 impl<B: DockerBackend> NodeService for NodeServiceImpl<B> {
     type StreamLogsStream = ReceiverStream<Result<LogLine, Status>>;
+    type DownloadFileStream = ReceiverStream<Result<FileChunk, Status>>;
 
     async fn start_server(
         &self,
@@ -126,10 +131,236 @@ impl<B: DockerBackend> NodeService for NodeServiceImpl<B> {
                 memory_mb:   r.memory_mb as i64,
                 cpu_percent: r.cpu_percent as i64,
                 env:         r.env,
+                ports:       r.ports,
             })
             .await
             .map_err(Status::from)?;
         Ok(Self::ok(format!("provisioned {}", r.server_id)))
+    }
+
+    async fn list_files(
+        &self,
+        req: Request<ListFilesRequest>,
+    ) -> Result<Response<ListFilesReply>, Status> {
+        let r = req.into_inner();
+        let entries = crate::files::list_files(Arc::clone(&self.docker), r.server_id, r.path)
+            .await
+            .map_err(Status::from)?;
+
+        let files = entries
+            .into_iter()
+            .map(|e| FileInfo {
+                name:       e.name,
+                path:       e.path,
+                is_dir:     e.is_dir,
+                size_bytes: e.size_bytes,
+                mode:       e.mode,
+            })
+            .collect();
+
+        Ok(Response::new(ListFilesReply { files }))
+    }
+
+    async fn get_file_contents(
+        &self,
+        req: Request<GetFileContentsRequest>,
+    ) -> Result<Response<GetFileContentsReply>, Status> {
+        let r = req.into_inner();
+        let content =
+            crate::files::get_file_contents(Arc::clone(&self.docker), r.server_id, r.path)
+                .await
+                .map_err(Status::from)?;
+
+        Ok(Response::new(GetFileContentsReply { content }))
+    }
+
+    async fn write_file_contents(
+        &self,
+        req: Request<WriteFileContentsRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        crate::files::write_file_contents(
+            Arc::clone(&self.docker),
+            r.server_id.clone(),
+            r.path,
+            r.content,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Self::ok(format!("wrote file to {}", r.server_id)))
+    }
+
+    async fn create_directory(
+        &self,
+        req: Request<CreateDirectoryRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        crate::files::create_directory(
+            Arc::clone(&self.docker),
+            r.server_id.clone(),
+            r.path,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Self::ok(format!("created directory on {}", r.server_id)))
+    }
+
+    async fn delete_files(
+        &self,
+        req: Request<DeleteFilesRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        crate::files::delete_files(
+            Arc::clone(&self.docker),
+            r.server_id.clone(),
+            r.path,
+            r.recursive,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Self::ok(format!("deleted files on {}", r.server_id)))
+    }
+
+    async fn rename_file(
+        &self,
+        req: Request<RenameFileRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        crate::files::rename_file(
+            Arc::clone(&self.docker),
+            r.server_id.clone(),
+            r.old_path,
+            r.new_path,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Self::ok(format!("renamed file on {}", r.server_id)))
+    }
+
+    async fn download_file(
+        &self,
+        req: Request<DownloadFileRequest>,
+    ) -> Result<Response<Self::DownloadFileStream>, Status> {
+        let r = req.into_inner();
+        let chunk_size = if r.chunk_size == 0 { 8192 } else { r.chunk_size as u64 };
+        let (tx, rx) = mpsc::channel(32);
+
+        let docker = Arc::clone(&self.docker);
+        let server_id = r.server_id.clone();
+        let path = r.path.clone();
+
+        tokio::spawn(async move {
+            let mut offset = 0u64;
+            loop {
+                match crate::files::download_file_chunk(
+                    Arc::clone(&docker),
+                    server_id.clone(),
+                    path.clone(),
+                    offset,
+                    chunk_size,
+                )
+                .await
+                {
+                    Ok(chunk) => {
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        let result = tx
+                            .send(Ok(FileChunk {
+                                server_id: server_id.clone(),
+                                path: path.clone(),
+                                chunk: chunk.clone(),
+                            }))
+                            .await;
+                        if result.is_err() {
+                            break;
+                        }
+                        offset += chunk.len() as u64;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(Status::from(e))).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn upload_file(
+        &self,
+        req: Request<tonic::Streaming<FileChunk>>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let mut stream = req.into_inner();
+        let mut server_id = String::new();
+        let mut first = true;
+
+        while let Some(chunk_result) = stream.message().await? {
+            if first {
+                server_id = chunk_result.server_id.clone();
+                first = false;
+            }
+
+            crate::files::upload_file_chunk(
+                Arc::clone(&self.docker),
+                chunk_result.server_id,
+                chunk_result.path,
+                chunk_result.chunk,
+                !first,
+            )
+            .await
+            .map_err(Status::from)?;
+        }
+
+        Ok(Self::ok(format!("uploaded file to {}", server_id)))
+    }
+
+    async fn create_backup(
+        &self,
+        req: Request<CreateBackupRequest>,
+    ) -> Result<Response<CreateBackupReply>, Status> {
+        let r = req.into_inner();
+        Uuid::parse_str(&r.backup_uuid)
+            .map_err(|_| Status::invalid_argument("invalid backup_uuid"))?;
+
+        let backup_path = format!("/var/lib/oxy/backups/{}.tar.gz", r.backup_uuid);
+
+        let (sha256, bytes) = crate::backups::create_backup(
+            &backup_path,
+            &r.server_id,
+            r.ignored_files,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Response::new(CreateBackupReply {
+            success: true,
+            message: "backup created".into(),
+            sha256,
+            bytes,
+        }))
+    }
+
+    async fn delete_backup(
+        &self,
+        req: Request<DeleteBackupRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        Uuid::parse_str(&r.backup_uuid)
+            .map_err(|_| Status::invalid_argument("invalid backup_uuid"))?;
+
+        let backup_path = format!("/var/lib/oxy/backups/{}.tar.gz", r.backup_uuid);
+
+        crate::backups::delete_backup(&backup_path)
+            .await
+            .map_err(Status::from)?;
+
+        Ok(Self::ok("backup deleted"))
     }
 }
 
@@ -293,6 +524,7 @@ mod tests {
                     assert_eq!(spec.memory_mb, 1024);
                     assert_eq!(spec.cpu_percent, 100);
                     assert_eq!(spec.env, vec!["EULA=TRUE"]);
+                    assert_eq!(spec.ports, vec!["0.0.0.0:25565:25565/tcp"]);
                     Ok("container-id-xyz".to_string())
                 }.boxed()
             });
@@ -305,6 +537,7 @@ mod tests {
                     memory_mb:   1024,
                     cpu_percent: 100,
                     env:         vec!["EULA=TRUE".into()],
+                    ports:       vec!["0.0.0.0:25565:25565/tcp".into()],
                 },
             ))
             .await
@@ -312,5 +545,48 @@ mod tests {
             .into_inner();
 
         assert!(reply.success);
+    }
+
+    #[tokio::test]
+    async fn delete_backup_rejects_invalid_uuid() {
+        let mock = MockDockerBackend::new();
+        let err = svc(mock)
+            .delete_backup(Request::new(DeleteBackupRequest {
+                server_id: "srv-1".into(),
+                backup_uuid: "not-a-uuid".into(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn delete_backup_rejects_path_traversal() {
+        let mock = MockDockerBackend::new();
+        let err = svc(mock)
+            .delete_backup(Request::new(DeleteBackupRequest {
+                server_id: "srv-1".into(),
+                backup_uuid: "../../../etc/passwd".into(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn create_backup_rejects_invalid_uuid() {
+        let mock = MockDockerBackend::new();
+        let err = svc(mock)
+            .create_backup(Request::new(CreateBackupRequest {
+                backup_uuid:   "invalid-uuid".into(),
+                server_id:     "srv-1".into(),
+                ignored_files: vec![],
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }

@@ -4,7 +4,11 @@ use wasm_bindgen_futures::spawn_local;
 use crate::api::{client::ApiClient, servers::Server};
 use crate::components::{Button, ErrorBanner};
 use crate::state::SessionContext;
-use super::{console_tab::ConsoleTab, logs_tab::LogsTab, stats_tab::StatsTab};
+use super::{
+    console_tab::ConsoleTab, files_tab::FilesTab, logs_tab::LogsTab, stats_tab::StatsTab,
+    startup_tab::StartupTab, databases_tab::DatabasesTab, schedules_tab::SchedulesTab,
+    backups_tab::BackupsTab, settings_tab::SettingsTab,
+};
 
 #[component]
 pub fn ServerDetailPage() -> impl IntoView {
@@ -15,13 +19,20 @@ pub fn ServerDetailPage() -> impl IntoView {
     let server = RwSignal::new(None::<Server>);
     let error = RwSignal::new(String::new());
     let active_tab = RwSignal::new("console");
+    let user_is_admin = RwSignal::new(false);
+    let user_is_owner = RwSignal::new(false);
 
     {
         let tok = session.token();
         let id = server_id();
+        let is_admin = session.is_admin();
+        user_is_admin.set(is_admin);
+        user_is_owner.set(is_admin);
         spawn_local(async move {
             match ApiClient::new(tok).get::<Server>(&format!("/servers/{}", id)).await {
-                Ok(s) => server.set(Some(s)),
+                Ok(s) => {
+                    server.set(Some(s));
+                },
                 Err(e) => error.set(e),
             }
         });
@@ -82,20 +93,31 @@ pub fn ServerDetailPage() -> impl IntoView {
                             </div>
                         </div>
 
-                        <div class="flex gap-2 border-b border-gray-200">
-                            {["console", "logs", "stats"].map(|tab| {
+                        <div class="flex gap-2 border-b border-gray-200 overflow-x-auto">
+                            {["console", "logs", "stats", "files", "startup", "databases", "schedules", "backups", "settings"].map(|tab| {
                                 view! {
                                     <button
                                         class=move || {
                                             if active_tab.get() == tab {
-                                                "px-4 py-2 border-b-2 border-blue-600 text-blue-600 font-medium"
+                                                "px-4 py-2 border-b-2 border-blue-600 text-blue-600 font-medium whitespace-nowrap"
                                             } else {
-                                                "px-4 py-2 text-gray-500 hover:text-gray-700"
+                                                "px-4 py-2 text-gray-500 hover:text-gray-700 whitespace-nowrap"
                                             }
                                         }
                                         on:click=move |_| active_tab.set(tab)
                                     >
-                                        {tab.to_string()}
+                                        {match tab {
+                                            "console" => "Console",
+                                            "logs" => "Logs",
+                                            "stats" => "Stats",
+                                            "files" => "Files",
+                                            "startup" => "Startup",
+                                            "databases" => "Databases",
+                                            "schedules" => "Schedules",
+                                            "backups" => "Backups",
+                                            "settings" => "Settings",
+                                            _ => tab,
+                                        }}
                                     </button>
                                 }
                             }).into_iter().collect_view()}
@@ -103,8 +125,14 @@ pub fn ServerDetailPage() -> impl IntoView {
 
                         <div>
                             {move || match active_tab.get() {
+                                "files" => view! { <FilesTab server_id=srv.id.clone() /> }.into_any(),
                                 "logs" => view! { <LogsTab server_id=srv.id.clone() /> }.into_any(),
                                 "stats" => view! { <StatsTab server_id=srv.id.clone() /> }.into_any(),
+                                "startup" => view! { <StartupTab server_id=srv.id.clone() is_admin=user_is_admin.get() /> }.into_any(),
+                                "databases" => view! { <DatabasesTab server_id=srv.id.clone() /> }.into_any(),
+                                "schedules" => view! { <SchedulesTab server_id=srv.id.clone() /> }.into_any(),
+                                "backups" => view! { <BackupsTab server_id=srv.id.clone() /> }.into_any(),
+                                "settings" => view! { <SettingsTab server_id=srv.id.clone() is_admin=user_is_admin.get() is_owner=user_is_owner.get() /> }.into_any(),
                                 _ => view! { <ConsoleTab server_id=srv.id.clone() /> }.into_any(),
                             }}
                         </div>

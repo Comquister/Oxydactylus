@@ -1,8 +1,9 @@
 use futures_util::{Stream, StreamExt};
 use oxy_core::proto::node::{
-    node_service_client::NodeServiceClient, LogLine, ServerCommandRequest, ServerDeleteRequest,
-    ServerLogsRequest, ServerProvisionRequest, ServerStartRequest, ServerStats, ServerStatsRequest,
-    ServerStopRequest,
+    node_service_client::NodeServiceClient, CreateDirectoryRequest, DeleteFilesRequest,
+    FileInfo, GetFileContentsRequest, ListFilesRequest, LogLine, RenameFileRequest,
+    ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest, ServerProvisionRequest,
+    ServerStartRequest, ServerStats, ServerStatsRequest, ServerStopRequest, WriteFileContentsRequest,
 };
 use std::pin::Pin;
 use tonic::{
@@ -54,6 +55,7 @@ impl NodeClient {
         memory_mb: u32,
         cpu_percent: u32,
         env: Vec<String>,
+        ports: Vec<String>,
     ) -> Result<()> {
         self.inner
             .provision_server(ServerProvisionRequest {
@@ -62,6 +64,7 @@ impl NodeClient {
                 memory_mb,
                 cpu_percent,
                 env,
+                ports,
             })
             .await
             .map(|_| ())
@@ -136,6 +139,90 @@ impl NodeClient {
             .into_inner();
         Ok(Box::pin(streaming.map(|r| r.map_err(PanelError::from))))
     }
+
+    pub async fn list_files(&mut self, server_id: &str, path: &str) -> Result<Vec<FileInfo>> {
+        self.inner
+            .list_files(ListFilesRequest {
+                server_id: server_id.to_string(),
+                path: path.to_string(),
+            })
+            .await
+            .map(|r| r.into_inner().files)
+            .map_err(PanelError::from)
+    }
+
+    pub async fn get_file_contents(&mut self, server_id: &str, path: &str) -> Result<Vec<u8>> {
+        self.inner
+            .get_file_contents(GetFileContentsRequest {
+                server_id: server_id.to_string(),
+                path: path.to_string(),
+            })
+            .await
+            .map(|r| r.into_inner().content)
+            .map_err(PanelError::from)
+    }
+
+    pub async fn write_file_contents(
+        &mut self,
+        server_id: &str,
+        path: &str,
+        content: Vec<u8>,
+    ) -> Result<()> {
+        self.inner
+            .write_file_contents(WriteFileContentsRequest {
+                server_id: server_id.to_string(),
+                path: path.to_string(),
+                content,
+            })
+            .await
+            .map(|_| ())
+            .map_err(PanelError::from)
+    }
+
+    pub async fn create_directory(&mut self, server_id: &str, path: &str) -> Result<()> {
+        self.inner
+            .create_directory(CreateDirectoryRequest {
+                server_id: server_id.to_string(),
+                path: path.to_string(),
+            })
+            .await
+            .map(|_| ())
+            .map_err(PanelError::from)
+    }
+
+    pub async fn delete_files(
+        &mut self,
+        server_id: &str,
+        path: &str,
+        recursive: bool,
+    ) -> Result<()> {
+        self.inner
+            .delete_files(DeleteFilesRequest {
+                server_id: server_id.to_string(),
+                path: path.to_string(),
+                recursive,
+            })
+            .await
+            .map(|_| ())
+            .map_err(PanelError::from)
+    }
+
+    pub async fn rename_file(
+        &mut self,
+        server_id: &str,
+        old_path: &str,
+        new_path: &str,
+    ) -> Result<()> {
+        self.inner
+            .rename_file(RenameFileRequest {
+                server_id: server_id.to_string(),
+                old_path: old_path.to_string(),
+                new_path: new_path.to_string(),
+            })
+            .await
+            .map(|_| ())
+            .map_err(PanelError::from)
+    }
 }
 
 #[cfg(test)]
@@ -143,9 +230,12 @@ mod tests {
     use super::*;
     use oxy_core::proto::node::{
         node_service_server::{NodeService, NodeServiceServer},
-        LogLine, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest,
-        ServerProvisionRequest, ServerReply, ServerStartRequest, ServerStats, ServerStatsRequest,
-        ServerStopRequest,
+        CreateBackupReply, CreateBackupRequest, CreateDirectoryRequest, DeleteBackupRequest,
+        DeleteFilesRequest, DownloadFileRequest, FileChunk, GetFileContentsReply,
+        GetFileContentsRequest, ListFilesReply, ListFilesRequest, LogLine, RenameFileRequest,
+        ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest, ServerProvisionRequest,
+        ServerReply, ServerStartRequest, ServerStats, ServerStatsRequest, ServerStopRequest,
+        WriteFileContentsRequest,
     };
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
     use tonic::{async_trait, Request, Response, Status};
@@ -155,6 +245,7 @@ mod tests {
     #[async_trait]
     impl NodeService for EchoNode {
         type StreamLogsStream = ReceiverStream<std::result::Result<LogLine, Status>>;
+        type DownloadFileStream = ReceiverStream<std::result::Result<FileChunk, Status>>;
 
         async fn provision_server(
             &self,
@@ -227,6 +318,98 @@ mod tests {
             let (_, rx) = tokio::sync::mpsc::channel(1);
             Ok(Response::new(ReceiverStream::new(rx)))
         }
+
+        async fn list_files(
+            &self,
+            _: Request<ListFilesRequest>,
+        ) -> std::result::Result<Response<ListFilesReply>, Status> {
+            Ok(Response::new(ListFilesReply { files: vec![] }))
+        }
+
+        async fn get_file_contents(
+            &self,
+            _: Request<GetFileContentsRequest>,
+        ) -> std::result::Result<Response<GetFileContentsReply>, Status> {
+            Ok(Response::new(GetFileContentsReply { content: vec![] }))
+        }
+
+        async fn write_file_contents(
+            &self,
+            _: Request<WriteFileContentsRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+
+        async fn create_directory(
+            &self,
+            _: Request<CreateDirectoryRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+
+        async fn delete_files(
+            &self,
+            _: Request<DeleteFilesRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+
+        async fn rename_file(
+            &self,
+            _: Request<RenameFileRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+
+        async fn download_file(
+            &self,
+            _: Request<DownloadFileRequest>,
+        ) -> std::result::Result<Response<Self::DownloadFileStream>, Status> {
+            let (_, rx) = tokio::sync::mpsc::channel(1);
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+
+        async fn upload_file(
+            &self,
+            _: Request<tonic::Streaming<FileChunk>>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn create_backup(
+            &self,
+            _: Request<CreateBackupRequest>,
+        ) -> std::result::Result<Response<CreateBackupReply>, Status> {
+            Ok(Response::new(CreateBackupReply {
+                success: true,
+                message: "ok".into(),
+                sha256: "abc123".into(),
+                bytes: 1000,
+            }))
+        }
+        async fn delete_backup(
+            &self,
+            _: Request<DeleteBackupRequest>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
     }
 
     async fn start_test_server(token: &str) -> String {
@@ -255,7 +438,7 @@ mod tests {
 
         let mut client = NodeClient::connect(&addr, token).await.unwrap();
         client
-            .provision("srv-1", "ubuntu:latest", 512, 50, vec!["X=1".into()])
+            .provision("srv-1", "ubuntu:latest", 512, 50, vec!["X=1".into()], vec![])
             .await
             .unwrap();
         client.start("srv-1").await.unwrap();
@@ -292,6 +475,7 @@ mod tests {
         #[async_trait]
         impl NodeService for LogNode {
             type StreamLogsStream = ReceiverStream<std::result::Result<LogLine, Status>>;
+            type DownloadFileStream = ReceiverStream<std::result::Result<FileChunk, Status>>;
 
             async fn provision_server(
                 &self,
@@ -378,6 +562,98 @@ mod tests {
                         .await;
                 });
                 Ok(Response::new(ReceiverStream::new(rx)))
+            }
+
+            async fn list_files(
+                &self,
+                _: Request<ListFilesRequest>,
+            ) -> std::result::Result<Response<ListFilesReply>, Status> {
+                Ok(Response::new(ListFilesReply { files: vec![] }))
+            }
+
+            async fn get_file_contents(
+                &self,
+                _: Request<GetFileContentsRequest>,
+            ) -> std::result::Result<Response<GetFileContentsReply>, Status> {
+                Ok(Response::new(GetFileContentsReply { content: vec![] }))
+            }
+
+            async fn write_file_contents(
+                &self,
+                _: Request<WriteFileContentsRequest>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
+            }
+
+            async fn create_directory(
+                &self,
+                _: Request<CreateDirectoryRequest>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
+            }
+
+            async fn delete_files(
+                &self,
+                _: Request<DeleteFilesRequest>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
+            }
+
+            async fn rename_file(
+                &self,
+                _: Request<RenameFileRequest>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
+            }
+
+            async fn download_file(
+                &self,
+                _: Request<DownloadFileRequest>,
+            ) -> std::result::Result<Response<Self::DownloadFileStream>, Status> {
+                let (_, rx) = tokio::sync::mpsc::channel(1);
+                Ok(Response::new(ReceiverStream::new(rx)))
+            }
+
+            async fn upload_file(
+                &self,
+                _: Request<tonic::Streaming<FileChunk>>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
+            }
+            async fn create_backup(
+                &self,
+                _: Request<CreateBackupRequest>,
+            ) -> std::result::Result<Response<CreateBackupReply>, Status> {
+                Ok(Response::new(CreateBackupReply {
+                    success: true,
+                    message: "ok".into(),
+                    sha256: "abc123".into(),
+                    bytes: 1000,
+                }))
+            }
+            async fn delete_backup(
+                &self,
+                _: Request<DeleteBackupRequest>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
             }
         }
 

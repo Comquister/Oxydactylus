@@ -14,13 +14,42 @@ use crate::{
     AppState,
 };
 
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ServerSubuser {
     pub id: Uuid,
     pub server_id: Uuid,
     pub user_id: Uuid,
     pub permissions: Vec<String>,
     pub created_at: DateTime<Utc>,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for ServerSubuser {
+    fn from_row(row: &'r sqlx::any::AnyRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let id_str: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let server_id_str: String = row.try_get("server_id")?;
+        let server_id = Uuid::parse_str(&server_id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let user_id_str: String = row.try_get("user_id")?;
+        let user_id = Uuid::parse_str(&user_id_str).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        let permissions_str: String = row.try_get("permissions")?;
+        let permissions: Vec<String> = serde_json::from_str(&permissions_str)
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        let created_at_str: String = row.try_get("created_at")?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        Ok(Self {
+            id,
+            server_id,
+            user_id,
+            permissions,
+            created_at,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,27 +68,34 @@ async fn check_access(
     user: &AuthUser,
     server_id: Uuid,
     perm: &str,
-    db: &sqlx::PgPool,
+    db: &sqlx::AnyPool,
 ) -> Result<()> {
     if user.is_admin {
         return Ok(());
     }
-    let owner_id: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM servers WHERE id = $1")
-        .bind(server_id)
+    let owner_id_opt: Option<String> = sqlx::query_scalar("SELECT user_id FROM servers WHERE id = $1")
+        .bind(server_id.to_string())
         .fetch_optional(db)
         .await?;
-    let owner_id = owner_id.ok_or_else(|| PanelError::NotFound(format!("server {}", server_id)))?;
+    let owner_id_str = owner_id_opt.ok_or_else(|| PanelError::NotFound(format!("server {}", server_id)))?;
+    let owner_id = Uuid::parse_str(&owner_id_str).map_err(|e| PanelError::Internal(e.to_string()))?;
     if owner_id == user.id {
         return Ok(());
     }
-    let perms: Vec<String> = sqlx::query_scalar(
-        "SELECT unnest(permissions) FROM server_subusers
+    let permissions_str: Option<String> = sqlx::query_scalar(
+        "SELECT permissions FROM server_subusers
          WHERE server_id = $1 AND user_id = $2",
     )
-    .bind(server_id)
-    .bind(user.id)
-    .fetch_all(db)
+    .bind(server_id.to_string())
+    .bind(user.id.to_string())
+    .fetch_optional(db)
     .await?;
+
+    let perms: Vec<String> = match permissions_str {
+        Some(s) => serde_json::from_str(&s).map_err(|e| PanelError::Internal(e.to_string()))?,
+        None => return Err(PanelError::Forbidden),
+    };
+
     if perms.iter().any(|p| p == perm) {
         Ok(())
     } else {
@@ -77,7 +113,7 @@ pub async fn list_subusers(
         "SELECT id, server_id, user_id, permissions, created_at
          FROM server_subusers WHERE server_id = $1 ORDER BY created_at",
     )
-    .bind(server_id)
+    .bind(server_id.to_string())
     .fetch_all(&state.db)
     .await?;
     Ok(Json(subusers))
@@ -95,16 +131,22 @@ pub async fn create_subuser(
             return Err(PanelError::Validation(format!("unknown permission: {}", p)));
         }
     }
-    let subuser = sqlx::query_as::<_, ServerSubuser>(
-        "INSERT INTO server_subusers (server_id, user_id, permissions)
-         VALUES ($1, $2, $3)
+    let id = Uuid::new_v4().to_string();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let sql = crate::db::port_sql(
+        "INSERT INTO server_subusers (id, server_id, user_id, permissions, created_at)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING id, server_id, user_id, permissions, created_at",
-    )
-    .bind(server_id)
-    .bind(body.user_id)
-    .bind(&body.permissions)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let subuser = sqlx::query_as::<_, ServerSubuser>(&sql)
+        .bind(&id)
+        .bind(server_id.to_string())
+        .bind(body.user_id.to_string())
+        .bind(serde_json::to_string(&body.permissions).unwrap())
+        .bind(&created_at)
+        .fetch_one(&state.db)
+        .await?;
     Ok((StatusCode::CREATED, Json(subuser)))
 }
 
@@ -120,16 +162,18 @@ pub async fn update_subuser(
             return Err(PanelError::Validation(format!("unknown permission: {}", p)));
         }
     }
-    let subuser = sqlx::query_as::<_, ServerSubuser>(
+    let sql = crate::db::port_sql(
         "UPDATE server_subusers SET permissions = $1
          WHERE id = $2 AND server_id = $3
          RETURNING id, server_id, user_id, permissions, created_at",
-    )
-    .bind(&body.permissions)
-    .bind(subuser_id)
-    .bind(server_id)
-    .fetch_one(&state.db)
-    .await?;
+        &state.db_backend,
+    );
+    let subuser = sqlx::query_as::<_, ServerSubuser>(&sql)
+        .bind(serde_json::to_string(&body.permissions).unwrap())
+        .bind(subuser_id.to_string())
+        .bind(server_id.to_string())
+        .fetch_one(&state.db)
+        .await?;
     Ok(Json(subuser))
 }
 
@@ -139,9 +183,13 @@ pub async fn delete_subuser(
     Path((server_id, subuser_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode> {
     check_access(&user, server_id, USER_DELETE, &state.db).await?;
-    let res = sqlx::query("DELETE FROM server_subusers WHERE id = $1 AND server_id = $2")
-        .bind(subuser_id)
-        .bind(server_id)
+    let sql = crate::db::port_sql(
+        "DELETE FROM server_subusers WHERE id = $1 AND server_id = $2",
+        &state.db_backend,
+    );
+    let res = sqlx::query(&sql)
+        .bind(subuser_id.to_string())
+        .bind(server_id.to_string())
         .execute(&state.db)
         .await?;
     if res.rows_affected() == 0 {
@@ -166,21 +214,28 @@ mod tests {
 
     const SECRET: &str = "test-secret-at-least-32-chars-long!!";
 
-    fn make_state(pool: sqlx::PgPool) -> AppState {
+    async fn make_state(pool: sqlx::PgPool) -> AppState {
+        use sqlx::ConnectOptions;
+        sqlx::any::install_default_drivers();
+        let db_url = pool.connect_options().to_url_lossy().to_string();
+        let any_pool = sqlx::AnyPool::connect(&db_url).await.unwrap();
         AppState {
-            db: pool,
+            db: any_pool,
+            db_backend: "PostgreSQL".to_string(),
             jwt_secret: SECRET.to_string(),
+            app_key: None,
         }
     }
 
     async fn seed_admin(pool: &sqlx::PgPool) -> (Uuid, String) {
         let id = Uuid::new_v4();
         let hash = hash_password("pass").unwrap();
-        sqlx::query("INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1,$2,$3,$4)")
-            .bind(id)
+        sqlx::query("INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES ($1,$2,$3,$4,$5)")
+            .bind(id.to_string())
             .bind("a@t.com")
             .bind(&hash)
             .bind(true)
+            .bind(chrono::Utc::now().to_rfc3339())
             .execute(pool)
             .await
             .unwrap();
@@ -191,10 +246,11 @@ mod tests {
     async fn seed_user(pool: &sqlx::PgPool, email: &str) -> (Uuid, String) {
         let id = Uuid::new_v4();
         let hash = hash_password("pass").unwrap();
-        sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1,$2,$3)")
-            .bind(id)
+        sqlx::query("INSERT INTO users (id, email, password_hash, created_at) VALUES ($1,$2,$3,$4)")
+            .bind(id.to_string())
             .bind(email)
             .bind(&hash)
+            .bind(chrono::Utc::now().to_rfc3339())
             .execute(pool)
             .await
             .unwrap();
@@ -203,31 +259,37 @@ mod tests {
     }
 
     async fn seed_node(pool: &sqlx::PgPool) -> Uuid {
-        sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO nodes (name, grpc_addr, token) VALUES ($1,$2,$3) RETURNING id",
+        let id_str: String = sqlx::query_scalar(
+            "INSERT INTO nodes (id, name, grpc_addr, token, created_at) VALUES ($1,$2,$3,$4,$5) RETURNING id",
         )
+        .bind(Uuid::new_v4().to_string())
         .bind("n")
         .bind("http://127.0.0.1:1")
         .bind("tok")
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(pool)
         .await
-        .unwrap()
+        .unwrap();
+        Uuid::parse_str(&id_str).unwrap()
     }
 
     async fn seed_server(pool: &sqlx::PgPool, user_id: Uuid, node_id: Uuid, name: &str) -> Uuid {
-        sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO servers (user_id, node_id, name, image, memory_mb, cpu_percent)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        let id_str: String = sqlx::query_scalar(
+            "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
-        .bind(user_id)
-        .bind(node_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(user_id.to_string())
+        .bind(node_id.to_string())
         .bind(name)
         .bind("ubuntu")
         .bind(512)
         .bind(50)
+        .bind(chrono::Utc::now().to_rfc3339())
         .fetch_one(pool)
         .await
-        .unwrap()
+        .unwrap();
+        Uuid::parse_str(&id_str).unwrap()
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -237,7 +299,7 @@ mod tests {
         let node_id = seed_node(&pool).await;
         let server_id = seed_server(&pool, admin_id, node_id, "sub-srv").await;
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "user_id":     sub_id,
             "permissions": ["control.start", "control.stop"],
@@ -265,7 +327,7 @@ mod tests {
         let node_id = seed_node(&pool).await;
         let server_id = seed_server(&pool, admin_id, node_id, "perm-srv").await;
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({ "user_id": other_id, "permissions": [] });
         let req = Request::builder()
             .method("POST")
@@ -285,7 +347,7 @@ mod tests {
         let node_id = seed_node(&pool).await;
         let server_id = seed_server(&pool, admin_id, node_id, "inv-srv").await;
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "user_id":     sub_id,
             "permissions": ["hacker.pwn"],
@@ -309,16 +371,19 @@ mod tests {
         let server_id = seed_server(&pool, admin_id, node_id, "list-srv").await;
 
         sqlx::query(
-            "INSERT INTO server_subusers (server_id, user_id, permissions)
-             VALUES ($1,$2,ARRAY['control.start'])",
+            "INSERT INTO server_subusers (id, server_id, user_id, permissions, created_at)
+             VALUES ($1,$2,$3,$4,$5)",
         )
-        .bind(server_id)
-        .bind(sub_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(server_id.to_string())
+        .bind(sub_id.to_string())
+        .bind(serde_json::to_string(&vec!["control.start"]).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(&pool)
         .await
         .unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("GET")
             .uri(format!("/api/servers/{}/subusers", server_id))
@@ -341,16 +406,19 @@ mod tests {
         let server_id = seed_server(&pool, owner_id, node_id, "perm-srv").await;
 
         sqlx::query(
-            "INSERT INTO server_subusers (server_id, user_id, permissions)
-             VALUES ($1, $2, ARRAY['user.read', 'user.create'])",
+            "INSERT INTO server_subusers (id, server_id, user_id, permissions, created_at)
+             VALUES ($1,$2,$3,$4,$5)",
         )
-        .bind(server_id)
-        .bind(sub1_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(server_id.to_string())
+        .bind(sub1_id.to_string())
+        .bind(serde_json::to_string(&vec!["user.read", "user.create"]).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
         .execute(&pool)
         .await
         .unwrap();
 
-        let app = router(make_state(pool.clone()));
+        let app = router(make_state(pool.clone()).await);
         let req = Request::builder()
             .method("GET")
             .uri(format!("/api/servers/{}/subusers", server_id))
@@ -363,7 +431,7 @@ mod tests {
         let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(list.as_array().unwrap().len(), 1);
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({
             "user_id":     sub2_id,
             "permissions": ["control.start"],
@@ -386,14 +454,21 @@ mod tests {
         let node_id = seed_node(&pool).await;
         let server_id = seed_server(&pool, admin_id, node_id, "upd-srv").await;
 
-        let subuser_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO server_subusers (server_id, user_id, permissions)
-             VALUES ($1,$2,ARRAY['control.start']) RETURNING id",
+        let subuser_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO server_subusers (id, server_id, user_id, permissions, created_at)
+             VALUES ($1,$2,$3,$4,$5)",
         )
-        .bind(server_id).bind(sub_id)
-        .fetch_one(&pool).await.unwrap();
+        .bind(subuser_id.to_string())
+        .bind(server_id.to_string())
+        .bind(sub_id.to_string())
+        .bind(serde_json::to_string(&vec!["control.start"]).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let body = serde_json::json!({ "permissions": ["control.start", "control.stop"] });
         let req = Request::builder()
             .method("PATCH")
@@ -416,14 +491,21 @@ mod tests {
         let node_id = seed_node(&pool).await;
         let server_id = seed_server(&pool, admin_id, node_id, "del-srv").await;
 
-        let subuser_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO server_subusers (server_id, user_id, permissions)
-             VALUES ($1,$2,ARRAY[]::text[]) RETURNING id",
+        let subuser_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO server_subusers (id, server_id, user_id, permissions, created_at)
+             VALUES ($1,$2,$3,$4,$5)",
         )
-        .bind(server_id).bind(sub_id)
-        .fetch_one(&pool).await.unwrap();
+        .bind(subuser_id.to_string())
+        .bind(server_id.to_string())
+        .bind(sub_id.to_string())
+        .bind(serde_json::to_string(&Vec::<String>::new()).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let app = router(make_state(pool.clone()));
+        let app = router(make_state(pool.clone()).await);
         let req = Request::builder()
             .method("DELETE")
             .uri(format!("/api/servers/{}/subusers/{}", server_id, subuser_id))
@@ -435,7 +517,7 @@ mod tests {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM server_subusers WHERE id = $1",
         )
-        .bind(subuser_id)
+        .bind(subuser_id.to_string())
         .fetch_one(&pool).await.unwrap();
         assert_eq!(count, 0);
     }
@@ -447,14 +529,21 @@ mod tests {
         let node_id = seed_node(&pool).await;
         let server_id = seed_server(&pool, admin_id, node_id, "del2-srv").await;
 
-        let subuser_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO server_subusers (server_id, user_id, permissions)
-             VALUES ($1,$2,ARRAY[]::text[]) RETURNING id",
+        let subuser_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO server_subusers (id, server_id, user_id, permissions, created_at)
+             VALUES ($1,$2,$3,$4,$5)",
         )
-        .bind(server_id).bind(other_id)
-        .fetch_one(&pool).await.unwrap();
+        .bind(subuser_id.to_string())
+        .bind(server_id.to_string())
+        .bind(other_id.to_string())
+        .bind(serde_json::to_string(&Vec::<String>::new()).unwrap())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("DELETE")
             .uri(format!("/api/servers/{}/subusers/{}", server_id, subuser_id))
@@ -471,7 +560,7 @@ mod tests {
         let server_id = seed_server(&pool, admin_id, node_id, "del-nonexist-srv").await;
         let random_subuser_id = Uuid::new_v4();
 
-        let app = router(make_state(pool));
+        let app = router(make_state(pool).await);
         let req = Request::builder()
             .method("DELETE")
             .uri(format!("/api/servers/{}/subusers/{}", server_id, random_subuser_id))
