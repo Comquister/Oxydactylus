@@ -233,10 +233,69 @@ async fn refresh(
     Ok(Json(AccessTokenResponse { access_token }))
 }
 
+#[derive(Debug, Deserialize)]
+struct SftpVerifyRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SftpVerifyResponse {
+    server_id: String,
+}
+
+async fn sftp_verify(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Json(body): Json<SftpVerifyRequest>,
+) -> std::result::Result<Json<SftpVerifyResponse>, PanelError> {
+    let (email, server_id_str) = body.username.split_once('.').ok_or_else(|| {
+        PanelError::Unauthorized("invalid username format".to_string())
+    })?;
+
+    let server_id = Uuid::parse_str(server_id_str)
+        .map_err(|_| PanelError::Unauthorized("invalid server uuid".to_string()))?;
+
+    let row: Option<UserRow> = sqlx::query_as::<_, UserRow>(
+        "SELECT id, email, password_hash, is_admin FROM users WHERE email = $1",
+    )
+    .bind(email)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let row = row.ok_or_else(|| PanelError::Unauthorized("invalid credentials".to_string()))?;
+
+    let password = body.password.clone();
+    let hash = row.password_hash.clone();
+    let valid = tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+        .await
+        .map_err(|e| PanelError::Internal(e.to_string()))?;
+
+    if !valid {
+        return Err(PanelError::Unauthorized("invalid credentials".to_string()));
+    }
+
+    let server_exists: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM servers WHERE id = $1 AND user_id = $2",
+    )
+    .bind(server_id.to_string())
+    .bind(row.id.to_string())
+    .fetch_optional(&state.db)
+    .await?;
+
+    if server_exists.is_none() {
+        return Err(PanelError::Forbidden);
+    }
+
+    Ok(Json(SftpVerifyResponse {
+        server_id: server_id.to_string(),
+    }))
+}
+
 pub fn auth_router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
         .route("/refresh", post(refresh))
+        .route("/sftp-verify", post(sftp_verify))
 }
 
 #[cfg(test)]

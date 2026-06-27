@@ -26,6 +26,13 @@ pub struct PanelConfig {
 pub struct NodeConfig {
     pub grpc_listen: String,
     pub token:       String,
+    #[serde(default = "default_sftp_port")]
+    pub sftp_port:   u16,
+    pub panel_addr:  String,
+}
+
+fn default_sftp_port() -> u16 {
+    2022
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,12 +74,15 @@ type = "node"
 [node]
 grpc_listen = "0.0.0.0:8080"
 token       = "secret-token"
+panel_addr  = "http://panel:3000"
 "#;
         let cfg: Config = toml::from_str(raw).unwrap();
         assert_eq!(cfg.role.kind, Role::Node);
         let node = cfg.node.unwrap();
         assert_eq!(node.grpc_listen, "0.0.0.0:8080");
         assert_eq!(node.token, "secret-token");
+        assert_eq!(node.panel_addr, "http://panel:3000");
+        assert_eq!(node.sftp_port, 2022);
         assert!(cfg.panel.is_none());
     }
 
@@ -90,6 +100,7 @@ jwt_secret   = "test-jwt-secret"
 [node]
 grpc_listen = "0.0.0.0:8080"
 token       = "secret-token"
+panel_addr  = "http://localhost:3000"
 "#;
         let cfg: Config = toml::from_str(raw).unwrap();
         assert_eq!(cfg.role.kind, Role::Both);
