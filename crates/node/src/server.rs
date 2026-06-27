@@ -14,6 +14,7 @@ use oxy_core::proto::node::{
 };
 use crate::docker::DockerBackend;
 use crate::stream::forward_logs;
+use uuid::Uuid;
 
 pub struct NodeServiceImpl<B: DockerBackend> {
     docker: Arc<B>,
@@ -324,6 +325,9 @@ impl<B: DockerBackend> NodeService for NodeServiceImpl<B> {
         req: Request<CreateBackupRequest>,
     ) -> Result<Response<CreateBackupReply>, Status> {
         let r = req.into_inner();
+        Uuid::parse_str(&r.backup_uuid)
+            .map_err(|_| Status::invalid_argument("invalid backup_uuid"))?;
+
         let backup_path = format!("/var/lib/oxy/backups/{}.tar.gz", r.backup_uuid);
 
         let (sha256, bytes) = crate::backups::create_backup(
@@ -347,6 +351,9 @@ impl<B: DockerBackend> NodeService for NodeServiceImpl<B> {
         req: Request<DeleteBackupRequest>,
     ) -> Result<Response<ServerReply>, Status> {
         let r = req.into_inner();
+        Uuid::parse_str(&r.backup_uuid)
+            .map_err(|_| Status::invalid_argument("invalid backup_uuid"))?;
+
         let backup_path = format!("/var/lib/oxy/backups/{}.tar.gz", r.backup_uuid);
 
         crate::backups::delete_backup(&backup_path)
@@ -538,5 +545,48 @@ mod tests {
             .into_inner();
 
         assert!(reply.success);
+    }
+
+    #[tokio::test]
+    async fn delete_backup_rejects_invalid_uuid() {
+        let mock = MockDockerBackend::new();
+        let err = svc(mock)
+            .delete_backup(Request::new(DeleteBackupRequest {
+                server_id: "srv-1".into(),
+                backup_uuid: "not-a-uuid".into(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn delete_backup_rejects_path_traversal() {
+        let mock = MockDockerBackend::new();
+        let err = svc(mock)
+            .delete_backup(Request::new(DeleteBackupRequest {
+                server_id: "srv-1".into(),
+                backup_uuid: "../../../etc/passwd".into(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn create_backup_rejects_invalid_uuid() {
+        let mock = MockDockerBackend::new();
+        let err = svc(mock)
+            .create_backup(Request::new(CreateBackupRequest {
+                backup_uuid:   "invalid-uuid".into(),
+                server_id:     "srv-1".into(),
+                ignored_files: vec![],
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }
