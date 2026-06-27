@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod allocations;
 pub mod auth;
 mod db;
@@ -24,7 +25,6 @@ use axum::{
 };
 use oxy_core::{OxyError, PanelConfig};
 use rust_embed::RustEmbed;
-use sqlx::AnyPool;
 
 #[derive(RustEmbed)]
 #[folder = "../frontend/dist/"]
@@ -67,6 +67,7 @@ pub fn router(state: AppState) -> axum::Router {
         .nest("/api/nodes", nodes::nodes_router().merge(allocations::router()))
         .nest("/api/servers", servers::servers_router())
         .nest("/api/eggs", eggs::eggs_router())
+        .merge(activity::activity_router())
         .with_state(state)
 }
 
