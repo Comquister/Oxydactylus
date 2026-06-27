@@ -25,6 +25,7 @@ pub struct Server {
     pub user_id: Uuid,
     pub node_id: Uuid,
     pub allocation_id: Option<Uuid>,
+    pub egg_id: Option<Uuid>,
     pub name: String,
     pub image: String,
     pub memory_mb: i32,
@@ -53,6 +54,12 @@ impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for Server {
             _ => None,
         };
 
+        let egg_id_opt: Option<String> = row.try_get("egg_id")?;
+        let egg_id = match egg_id_opt {
+            Some(s) if !s.is_empty() => Some(Uuid::parse_str(&s).map_err(|e| sqlx::Error::Decode(Box::new(e)))?),
+            _ => None,
+        };
+
         let env_str: String = row.try_get("env")?;
         let env: Vec<String> = serde_json::from_str(&env_str)
             .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
@@ -67,6 +74,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::any::AnyRow> for Server {
             user_id,
             node_id,
             allocation_id,
+            egg_id,
             name: row.try_get("name")?,
             image: row.try_get("image")?,
             memory_mb: row.try_get("memory_mb")?,
@@ -123,7 +131,7 @@ async fn fetch_server_ports(state: &AppState, server_id: Uuid) -> Result<Vec<Str
 
 pub(crate) async fn fetch_server(db: &sqlx::AnyPool, id: Uuid) -> Result<Server> {
     sqlx::query_as::<_, Server>(
-        "SELECT id, user_id, node_id, allocation_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
+        "SELECT id, user_id, node_id, allocation_id, egg_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
          FROM servers WHERE id = $1",
     )
     .bind(id.to_string())
@@ -180,14 +188,14 @@ pub(crate) async fn load_server_with_access(
 async fn list_servers(State(state): State<AppState>, user: AuthUser) -> Result<Json<Vec<Server>>> {
     let servers = if user.is_admin {
         sqlx::query_as::<_, Server>(
-            "SELECT id, user_id, node_id, allocation_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
+            "SELECT id, user_id, node_id, allocation_id, egg_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
              FROM servers ORDER BY created_at",
         )
         .fetch_all(&state.db)
         .await?
     } else {
         sqlx::query_as::<_, Server>(
-            "SELECT id, user_id, node_id, allocation_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
+            "SELECT id, user_id, node_id, allocation_id, egg_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at
              FROM servers WHERE user_id = $1 ORDER BY created_at",
         )
         .bind(user.id.to_string())
@@ -252,7 +260,7 @@ async fn create_server(
     let sql = crate::db::port_sql(
         "INSERT INTO servers (id, user_id, node_id, name, image, memory_mb, cpu_percent, env, egg_id, status, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'installing', $10)
-         RETURNING id, user_id, node_id, allocation_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at",
+         RETURNING id, user_id, node_id, allocation_id, egg_id, name, image, memory_mb, cpu_percent, env, status, database_limit, backup_limit, allocation_limit, created_at",
         &state.db_backend,
     );
     let mut server = sqlx::query_as::<_, Server>(&sql)
@@ -536,6 +544,7 @@ pub fn servers_router() -> Router<AppState> {
         .route("/:id/network", get(list_server_network).post(assign_allocation))
         .route("/:id/network/:aid", delete(remove_allocation))
         .route("/:id/network/:aid/make-primary", post(make_allocation_primary))
+        .nest("/:id/startup", crate::startup::startup_router())
         .merge(crate::files::files_router())
 }
 
