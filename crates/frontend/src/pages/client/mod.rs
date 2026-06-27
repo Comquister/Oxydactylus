@@ -5,9 +5,15 @@ use crate::state::SessionContext;
 
 pub mod console_tab;
 pub mod dashboard;
+pub mod files_tab;
 pub mod logs_tab;
 pub mod server_detail;
 pub mod stats_tab;
+pub mod startup_tab;
+pub mod databases_tab;
+pub mod schedules_tab;
+pub mod backups_tab;
+pub mod settings_tab;
 
 #[component]
 pub fn ClientLayout() -> impl IntoView {
