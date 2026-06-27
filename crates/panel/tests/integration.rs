@@ -5,8 +5,12 @@ use axum::{
 use http_body_util::BodyExt;
 use oxy_core::proto::node::{
     node_service_server::{NodeService, NodeServiceServer},
-    LogLine, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest, ServerProvisionRequest,
+    CreateBackupReply, CreateBackupRequest, CreateDirectoryRequest, DeleteBackupRequest,
+    DeleteFilesRequest, DownloadFileRequest, FileChunk, GetFileContentsReply,
+    GetFileContentsRequest, ListFilesReply, ListFilesRequest, LogLine, RenameFileRequest,
+    ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest, ServerProvisionRequest,
     ServerReply, ServerStartRequest, ServerStats, ServerStatsRequest, ServerStopRequest,
+    WriteFileContentsRequest,
 };
 use oxy_panel::{
     auth::{encode_token, hash_password},
@@ -25,6 +29,8 @@ struct OkNode;
 #[async_trait]
 impl NodeService for OkNode {
     type StreamLogsStream = ReceiverStream<Result<LogLine, Status>>;
+    type DownloadFileStream = ReceiverStream<Result<FileChunk, Status>>;
+
     async fn provision_server(
         &self,
         _: GrpcRequest<ServerProvisionRequest>,
@@ -88,6 +94,90 @@ impl NodeService for OkNode {
     ) -> Result<Response<Self::StreamLogsStream>, Status> {
         let (_, rx) = tokio::sync::mpsc::channel(1);
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+    async fn list_files(
+        &self,
+        _: GrpcRequest<ListFilesRequest>,
+    ) -> Result<Response<ListFilesReply>, Status> {
+        Ok(Response::new(ListFilesReply { files: vec![] }))
+    }
+    async fn get_file_contents(
+        &self,
+        _: GrpcRequest<GetFileContentsRequest>,
+    ) -> Result<Response<GetFileContentsReply>, Status> {
+        Ok(Response::new(GetFileContentsReply { content: vec![] }))
+    }
+    async fn write_file_contents(
+        &self,
+        _: GrpcRequest<WriteFileContentsRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
+    async fn create_directory(
+        &self,
+        _: GrpcRequest<CreateDirectoryRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
+    async fn delete_files(
+        &self,
+        _: GrpcRequest<DeleteFilesRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
+    async fn rename_file(
+        &self,
+        _: GrpcRequest<RenameFileRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
+    async fn download_file(
+        &self,
+        _: GrpcRequest<DownloadFileRequest>,
+    ) -> Result<Response<Self::DownloadFileStream>, Status> {
+        let (_, rx) = tokio::sync::mpsc::channel(1);
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+    async fn upload_file(
+        &self,
+        _: GrpcRequest<tonic::Streaming<FileChunk>>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
+    }
+    async fn create_backup(
+        &self,
+        _: GrpcRequest<CreateBackupRequest>,
+    ) -> Result<Response<CreateBackupReply>, Status> {
+        Ok(Response::new(CreateBackupReply {
+            success: true,
+            message: "ok".into(),
+            sha256: "abc123".into(),
+            bytes: 1000,
+        }))
+    }
+    async fn delete_backup(
+        &self,
+        _: GrpcRequest<DeleteBackupRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        Ok(Response::new(ServerReply {
+            success: true,
+            message: "ok".into(),
+        }))
     }
 }
 

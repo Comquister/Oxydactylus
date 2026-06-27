@@ -230,11 +230,12 @@ mod tests {
     use super::*;
     use oxy_core::proto::node::{
         node_service_server::{NodeService, NodeServiceServer},
-        CreateDirectoryRequest, DeleteFilesRequest, DownloadFileRequest, FileChunk,
-        GetFileContentsRequest, GetFileContentsReply, ListFilesReply, ListFilesRequest,
-        LogLine, RenameFileRequest, ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest,
-        ServerProvisionRequest, ServerReply, ServerStartRequest, ServerStats, ServerStatsRequest,
-        ServerStopRequest, WriteFileContentsRequest,
+        CreateBackupReply, CreateBackupRequest, CreateDirectoryRequest, DeleteBackupRequest,
+        DeleteFilesRequest, DownloadFileRequest, FileChunk, GetFileContentsReply,
+        GetFileContentsRequest, ListFilesReply, ListFilesRequest, LogLine, RenameFileRequest,
+        ServerCommandRequest, ServerDeleteRequest, ServerLogsRequest, ServerProvisionRequest,
+        ServerReply, ServerStartRequest, ServerStats, ServerStatsRequest, ServerStopRequest,
+        WriteFileContentsRequest,
     };
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
     use tonic::{async_trait, Request, Response, Status};
@@ -383,6 +384,26 @@ mod tests {
         async fn upload_file(
             &self,
             _: Request<tonic::Streaming<FileChunk>>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn create_backup(
+            &self,
+            _: Request<CreateBackupRequest>,
+        ) -> std::result::Result<Response<CreateBackupReply>, Status> {
+            Ok(Response::new(CreateBackupReply {
+                success: true,
+                message: "ok".into(),
+                sha256: "abc123".into(),
+                bytes: 1000,
+            }))
+        }
+        async fn delete_backup(
+            &self,
+            _: Request<DeleteBackupRequest>,
         ) -> std::result::Result<Response<ServerReply>, Status> {
             Ok(Response::new(ServerReply {
                 success: true,
@@ -608,6 +629,26 @@ mod tests {
             async fn upload_file(
                 &self,
                 _: Request<tonic::Streaming<FileChunk>>,
+            ) -> std::result::Result<Response<ServerReply>, Status> {
+                Ok(Response::new(ServerReply {
+                    success: true,
+                    message: "ok".into(),
+                }))
+            }
+            async fn create_backup(
+                &self,
+                _: Request<CreateBackupRequest>,
+            ) -> std::result::Result<Response<CreateBackupReply>, Status> {
+                Ok(Response::new(CreateBackupReply {
+                    success: true,
+                    message: "ok".into(),
+                    sha256: "abc123".into(),
+                    bytes: 1000,
+                }))
+            }
+            async fn delete_backup(
+                &self,
+                _: Request<DeleteBackupRequest>,
             ) -> std::result::Result<Response<ServerReply>, Status> {
                 Ok(Response::new(ServerReply {
                     success: true,

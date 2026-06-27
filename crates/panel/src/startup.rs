@@ -237,6 +237,7 @@ mod tests {
     use http_body_util::BodyExt;
     use oxy_core::proto::node::{
         node_service_server::NodeService,
+        CreateBackupReply, CreateBackupRequest, DeleteBackupRequest,
         ServerProvisionRequest, ServerReply, ServerStartRequest, ServerStopRequest,
         ServerDeleteRequest, ServerCommandRequest, ServerStats, ServerStatsRequest,
         ServerLogsRequest, LogLine, ListFilesRequest, ListFilesReply,
@@ -422,6 +423,26 @@ mod tests {
         async fn upload_file(
             &self,
             _: GrpcRequest<tonic::Streaming<FileChunk>>,
+        ) -> std::result::Result<Response<ServerReply>, Status> {
+            Ok(Response::new(ServerReply {
+                success: true,
+                message: "ok".into(),
+            }))
+        }
+        async fn create_backup(
+            &self,
+            _: GrpcRequest<CreateBackupRequest>,
+        ) -> std::result::Result<Response<CreateBackupReply>, Status> {
+            Ok(Response::new(CreateBackupReply {
+                success: true,
+                message: "ok".into(),
+                sha256: "abc123".into(),
+                bytes: 1000,
+            }))
+        }
+        async fn delete_backup(
+            &self,
+            _: GrpcRequest<DeleteBackupRequest>,
         ) -> std::result::Result<Response<ServerReply>, Status> {
             Ok(Response::new(ServerReply {
                 success: true,
