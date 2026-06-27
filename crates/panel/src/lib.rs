@@ -10,6 +10,8 @@ mod files;
 pub mod node_client;
 mod nodes;
 pub mod permissions;
+mod scheduler;
+mod schedules;
 mod server_databases;
 mod servers;
 mod settings;
@@ -91,6 +93,9 @@ pub async fn run(config: PanelConfig) -> oxy_core::Result<()> {
     db::run_migrations(&pool)
         .await
         .map_err(|e| OxyError::Config(e.to_string()))?;
+
+    scheduler::start(pool.clone(), backend.clone());
+
     let state = AppState {
         db: pool,
         db_backend: backend,

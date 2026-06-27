@@ -552,6 +552,7 @@ pub fn servers_router() -> Router<AppState> {
         .nest("/:id/settings", crate::settings::settings_router())
         .nest("/:id/startup", crate::startup::startup_router())
         .merge(crate::files::files_router())
+        .merge(crate::schedules::schedules_router())
 }
 
 #[derive(Debug, Deserialize)]
