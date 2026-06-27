@@ -11,7 +11,8 @@ use uuid::Uuid;
 use crate::{
     auth::{AdminUser, AuthUser},
     db::port_sql,
-    error::Result,
+    error::{PanelError, Result},
+    servers::fetch_server,
     AppState,
 };
 
@@ -131,9 +132,14 @@ async fn log_activity_inner(pool: &AnyPool, backend: &str, entry: ActivityEntry)
 async fn server_activity(
     State(state): State<AppState>,
     Path(server_id): Path<Uuid>,
-    _user: AuthUser,
+    user: AuthUser,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Vec<ActivityLog>>> {
+    let server = fetch_server(&state.db, server_id).await?;
+    if !user.is_admin && server.user_id != user.id {
+        return Err(PanelError::Forbidden);
+    }
+
     let sql = port_sql(
         "SELECT id, batch_id, server_id, user_id, event, properties, ip, created_at
          FROM activity_logs WHERE server_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
