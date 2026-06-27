@@ -2,6 +2,7 @@ pub mod activity;
 pub mod allocations;
 pub mod auth;
 mod db;
+mod database_hosts;
 pub mod egg_vars;
 mod eggs;
 pub mod error;
@@ -9,6 +10,7 @@ mod files;
 pub mod node_client;
 mod nodes;
 pub mod permissions;
+mod server_databases;
 mod servers;
 mod settings;
 mod startup;
@@ -65,7 +67,8 @@ pub fn router(state: AppState) -> axum::Router {
         .nest("/auth", auth::auth_router())
         .nest("/api/users", users::users_router())
         .nest("/api/nodes", nodes::nodes_router().merge(allocations::router()))
-        .nest("/api/servers", servers::servers_router())
+        .nest("/api/servers", servers::servers_router().merge(server_databases::server_databases_router()))
+        .nest("/api/database-hosts", database_hosts::database_hosts_router())
         .nest("/api/eggs", eggs::eggs_router())
         .merge(activity::activity_router())
         .with_state(state)
