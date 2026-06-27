@@ -5,6 +5,7 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -15,6 +16,65 @@ use crate::{
     servers::{check_server_access, fetch_server},
     AppState,
 };
+
+fn validate_mysql_username(username: &str) -> Result<()> {
+    if username.is_empty() || username.len() > 32 {
+        return Err(PanelError::Validation(
+            "MySQL username must be 1-32 characters".to_string(),
+        ));
+    }
+    if !username
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(PanelError::Validation(
+            "MySQL username must contain only alphanumeric characters and underscores".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mysql_database_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(PanelError::Validation(
+            "database name must be 1-64 characters".to_string(),
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(PanelError::Validation(
+            "database name must contain only alphanumeric characters, underscores, and hyphens".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mysql_remote_host(remote: &str) -> Result<()> {
+    if remote.is_empty() || remote.len() > 255 {
+        return Err(PanelError::Validation(
+            "remote host must be 1-255 characters".to_string(),
+        ));
+    }
+
+    if remote == "%" || remote == "localhost" {
+        return Ok(());
+    }
+
+    let domain_pattern = Regex::new(r"^[a-zA-Z0-9%]([a-zA-Z0-9\-\.%]{0,253}[a-zA-Z0-9%])?$").unwrap();
+    if domain_pattern.is_match(remote) {
+        return Ok(());
+    }
+
+    Err(PanelError::Validation(
+        "invalid remote host format: must be '%', 'localhost', IP address, or domain name".to_string(),
+    ))
+}
+
+fn escape_mysql_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
 
 #[derive(Debug, Serialize)]
 pub struct ServerDatabase {
@@ -117,12 +177,13 @@ async fn create_server_database(
     let server = fetch_server(&state.db, server_id).await?;
     check_server_access(&user, &server, Some("database.create"), &state.db).await?;
 
-    if body.database_name.is_empty() {
-        return Err(PanelError::Validation("database_name is required".to_string()));
-    }
+    validate_mysql_database_name(&body.database_name)?;
 
     let username = body.username.unwrap_or_else(|| format!("db_{}", Uuid::new_v4().to_string()[..8].to_string()));
     let remote = body.remote.unwrap_or_else(|| "%".to_string());
+
+    validate_mysql_username(&username)?;
+    validate_mysql_remote_host(&remote)?;
 
     let host_sql = db::port_sql(
         "SELECT host, port, username, password FROM database_hosts WHERE id = $1",
@@ -161,11 +222,12 @@ async fn create_server_database(
         .await
         .map_err(|e| PanelError::Internal(format!("failed to create database: {}", e)))?;
 
+    let escaped_pass = escape_mysql_string(&db_pass);
+    let escaped_remote = escape_mysql_string(&db_remote);
+
     sqlx::query(&format!(
         "CREATE USER IF NOT EXISTS '{}'@'{}' IDENTIFIED BY '{}'",
-        db_user.replace('\'', ""),
-        db_remote.replace('\'', ""),
-        db_pass.replace('\'', "")
+        db_user, escaped_remote, escaped_pass
     ))
     .execute(&mysql_pool)
     .await
@@ -173,9 +235,7 @@ async fn create_server_database(
 
     sqlx::query(&format!(
         "GRANT ALL PRIVILEGES ON `{}`.* TO '{}'@'{}'",
-        db_name.replace('`', ""),
-        db_user.replace('\'', ""),
-        db_remote.replace('\'', "")
+        db_name.replace('`', ""), db_user, escaped_remote
     ))
     .execute(&mysql_pool)
     .await
@@ -279,10 +339,14 @@ async fn delete_server_database(
         .await
         .map_err(|e| PanelError::Internal(format!("failed to connect to MySQL host: {}", e)))?;
 
-    sqlx::query(&format!("DROP USER IF EXISTS '{}'@'{}'", db_user.replace('\'', ""), db_remote.replace('\'', "")))
-        .execute(&mysql_pool)
-        .await
-        .ok();
+    let escaped_remote = escape_mysql_string(&db_remote);
+    sqlx::query(&format!(
+        "DROP USER IF EXISTS '{}'@'{}'",
+        db_user, escaped_remote
+    ))
+    .execute(&mysql_pool)
+    .await
+    .ok();
 
     sqlx::query(&format!("DROP DATABASE IF NOT EXISTS `{}`", db_name.replace('`', "")))
         .execute(&mysql_pool)
@@ -368,11 +432,12 @@ async fn rotate_database_password(
         .map_err(|e| PanelError::Internal(format!("failed to connect to MySQL host: {}", e)))?;
 
     let new_pass = Uuid::new_v4().to_string();
+    let escaped_pass = escape_mysql_string(&new_pass);
+    let escaped_remote = escape_mysql_string(&db_remote);
+
     sqlx::query(&format!(
         "ALTER USER '{}'@'{}' IDENTIFIED BY '{}'",
-        db_user.replace('\'', ""),
-        db_remote.replace('\'', ""),
-        new_pass.replace('\'', "")
+        db_user, escaped_remote, escaped_pass
     ))
     .execute(&mysql_pool)
     .await
@@ -544,5 +609,89 @@ mod tests {
 
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_validate_mysql_username_accepts_valid_names() {
+        assert!(validate_mysql_username("db_user").is_ok());
+        assert!(validate_mysql_username("db_123").is_ok());
+        assert!(validate_mysql_username("a").is_ok());
+        assert!(validate_mysql_username(&"x".repeat(32)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_mysql_username_rejects_invalid_names() {
+        assert!(validate_mysql_username("").is_err());
+        assert!(validate_mysql_username(&"x".repeat(33)).is_err());
+        assert!(validate_mysql_username("db-user").is_err());
+        assert!(validate_mysql_username("db@user").is_err());
+        assert!(validate_mysql_username("user name").is_err());
+        assert!(validate_mysql_username("db'user").is_err());
+    }
+
+    #[test]
+    fn test_validate_mysql_database_name_accepts_valid_names() {
+        assert!(validate_mysql_database_name("mydb").is_ok());
+        assert!(validate_mysql_database_name("my_db").is_ok());
+        assert!(validate_mysql_database_name("my-db").is_ok());
+        assert!(validate_mysql_database_name("db123").is_ok());
+        assert!(validate_mysql_database_name(&"x".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_mysql_database_name_rejects_invalid_names() {
+        assert!(validate_mysql_database_name("").is_err());
+        assert!(validate_mysql_database_name(&"x".repeat(65)).is_err());
+        assert!(validate_mysql_database_name("my db").is_err());
+        assert!(validate_mysql_database_name("my@db").is_err());
+        assert!(validate_mysql_database_name("my'db").is_err());
+    }
+
+    #[test]
+    fn test_validate_mysql_remote_host_accepts_valid_hosts() {
+        assert!(validate_mysql_remote_host("%").is_ok());
+        assert!(validate_mysql_remote_host("localhost").is_ok());
+        assert!(validate_mysql_remote_host("192.168.1.1").is_ok());
+        assert!(validate_mysql_remote_host("192.168.%.%").is_ok());
+        assert!(validate_mysql_remote_host("example.com").is_ok());
+        assert!(validate_mysql_remote_host("db.example.com").is_ok());
+    }
+
+    #[test]
+    fn test_validate_mysql_remote_host_rejects_invalid_hosts() {
+        assert!(validate_mysql_remote_host("").is_err());
+        assert!(validate_mysql_remote_host(&"x".repeat(256)).is_err());
+    }
+
+    #[test]
+    fn test_escape_mysql_string_escapes_backslash() {
+        assert_eq!(escape_mysql_string("test\\pass"), "test\\\\pass");
+        assert_eq!(
+            escape_mysql_string("pass\\with\\multiple"),
+            "pass\\\\with\\\\multiple"
+        );
+    }
+
+    #[test]
+    fn test_escape_mysql_string_escapes_single_quote() {
+        assert_eq!(escape_mysql_string("test'pass"), "test\\'pass");
+        assert_eq!(escape_mysql_string("'test'"), "\\'test\\'");
+    }
+
+    #[test]
+    fn test_escape_mysql_string_escapes_both_backslash_and_quote() {
+        assert_eq!(escape_mysql_string("test\\'pass"), "test\\\\\\'pass");
+        assert_eq!(
+            escape_mysql_string("pass\\with'quote"),
+            "pass\\\\with\\'quote"
+        );
+    }
+
+    #[test]
+    fn test_escape_mysql_string_does_not_escape_other_chars() {
+        assert_eq!(
+            escape_mysql_string("normal_password_123"),
+            "normal_password_123"
+        );
     }
 }
