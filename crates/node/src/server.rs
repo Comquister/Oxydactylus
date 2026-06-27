@@ -5,12 +5,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use oxy_core::proto::node::{
     node_service_server::NodeService,
-    CreateDirectoryRequest, DeleteFilesRequest, DownloadFileRequest, FileChunk,
-    FileInfo, GetFileContentsReply, GetFileContentsRequest, ListFilesReply,
-    ListFilesRequest, LogLine, RenameFileRequest, ServerCommandRequest,
-    ServerDeleteRequest, ServerLogsRequest, ServerProvisionRequest, ServerReply,
-    ServerStartRequest, ServerStats, ServerStatsRequest, ServerStopRequest,
-    WriteFileContentsRequest,
+    CreateBackupReply, CreateBackupRequest, CreateDirectoryRequest, DeleteBackupRequest,
+    DeleteFilesRequest, DownloadFileRequest, FileChunk, FileInfo,
+    GetFileContentsReply, GetFileContentsRequest, ListFilesReply, ListFilesRequest,
+    LogLine, RenameFileRequest, ServerCommandRequest, ServerDeleteRequest,
+    ServerLogsRequest, ServerProvisionRequest, ServerReply, ServerStartRequest,
+    ServerStats, ServerStatsRequest, ServerStopRequest, WriteFileContentsRequest,
 };
 use crate::docker::DockerBackend;
 use crate::stream::forward_logs;
@@ -317,6 +317,43 @@ impl<B: DockerBackend> NodeService for NodeServiceImpl<B> {
         }
 
         Ok(Self::ok(format!("uploaded file to {}", server_id)))
+    }
+
+    async fn create_backup(
+        &self,
+        req: Request<CreateBackupRequest>,
+    ) -> Result<Response<CreateBackupReply>, Status> {
+        let r = req.into_inner();
+        let backup_path = format!("/var/lib/oxy/backups/{}.tar.gz", r.backup_uuid);
+
+        let (sha256, bytes) = crate::backups::create_backup(
+            &backup_path,
+            &r.server_id,
+            r.ignored_files,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Response::new(CreateBackupReply {
+            success: true,
+            message: "backup created".into(),
+            sha256,
+            bytes,
+        }))
+    }
+
+    async fn delete_backup(
+        &self,
+        req: Request<DeleteBackupRequest>,
+    ) -> Result<Response<ServerReply>, Status> {
+        let r = req.into_inner();
+        let backup_path = format!("/var/lib/oxy/backups/{}.tar.gz", r.backup_uuid);
+
+        crate::backups::delete_backup(&backup_path)
+            .await
+            .map_err(Status::from)?;
+
+        Ok(Self::ok("backup deleted"))
     }
 }
 
