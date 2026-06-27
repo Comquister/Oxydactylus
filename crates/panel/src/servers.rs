@@ -19,7 +19,7 @@ use crate::{
     subusers, AppState,
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Server {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -378,6 +378,11 @@ async fn start_server(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
     let server = fetch_server(&state.db, id).await?;
+    if server.status == "suspended" {
+        return Err(PanelError::Validation(
+            "cannot start a suspended server".to_string(),
+        ));
+    }
     check_server_access(&user, &server, Some(CONTROL_START), &state.db).await?;
     let mut client = get_node_client(&state, server.node_id).await?;
     match client.start(&server.id.to_string()).await {
@@ -525,7 +530,7 @@ async fn stream_server_logs(
 pub fn servers_router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_servers).post(create_server))
-        .route("/:id", get(get_server).delete(delete_server))
+        .route("/:id", get(get_server).delete(delete_server).patch(crate::settings::rename_server))
         .route("/:id/start", post(start_server))
         .route("/:id/stop", post(stop_server))
         .route("/:id/restart", post(restart_server))
@@ -544,6 +549,7 @@ pub fn servers_router() -> Router<AppState> {
         .route("/:id/network", get(list_server_network).post(assign_allocation))
         .route("/:id/network/:aid", delete(remove_allocation))
         .route("/:id/network/:aid/make-primary", post(make_allocation_primary))
+        .nest("/:id/settings", crate::settings::settings_router())
         .nest("/:id/startup", crate::startup::startup_router())
         .merge(crate::files::files_router())
 }

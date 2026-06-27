@@ -9,6 +9,7 @@ pub mod node_client;
 mod nodes;
 pub mod permissions;
 mod servers;
+mod settings;
 mod startup;
 pub mod subusers;
 mod users;
