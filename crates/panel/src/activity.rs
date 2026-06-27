@@ -368,6 +368,107 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    async fn test_server_activity_rejects_non_owner(pool: sqlx::PgPool) {
+        let (owner_id, _owner_token) = seed_user(&pool).await;
+        let (other_user_id, other_token) = seed_user(&pool).await;
+        let server_id = seed_server(&pool, owner_id).await;
+
+        sqlx::query(
+            "INSERT INTO activity_logs (id, server_id, user_id, event, properties, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)"
+        )
+            .bind(Uuid::new_v4().to_string())
+            .bind(server_id.to_string())
+            .bind(owner_id.to_string())
+            .bind("test.event")
+            .bind("{}")
+            .bind(Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let state = make_state(pool).await;
+        let app = make_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri(&format!("/api/servers/{}/activity", server_id))
+            .header("authorization", format!("Bearer {}", other_token))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn test_server_activity_allows_owner(pool: sqlx::PgPool) {
+        let (owner_id, owner_token) = seed_user(&pool).await;
+        let server_id = seed_server(&pool, owner_id).await;
+
+        sqlx::query(
+            "INSERT INTO activity_logs (id, server_id, user_id, event, properties, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)"
+        )
+            .bind(Uuid::new_v4().to_string())
+            .bind(server_id.to_string())
+            .bind(owner_id.to_string())
+            .bind("test.event")
+            .bind("{}")
+            .bind(Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let state = make_state(pool).await;
+        let app = make_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri(&format!("/api/servers/{}/activity", server_id))
+            .header("authorization", format!("Bearer {}", owner_token))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let logs: Vec<ActivityLog> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(logs.len(), 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn test_server_activity_allows_admin(pool: sqlx::PgPool) {
+        let (owner_id, _owner_token) = seed_user(&pool).await;
+        let (_admin_id, admin_token) = seed_admin(&pool).await;
+        let server_id = seed_server(&pool, owner_id).await;
+
+        sqlx::query(
+            "INSERT INTO activity_logs (id, server_id, user_id, event, properties, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)"
+        )
+            .bind(Uuid::new_v4().to_string())
+            .bind(server_id.to_string())
+            .bind(owner_id.to_string())
+            .bind("test.event")
+            .bind("{}")
+            .bind(Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let state = make_state(pool).await;
+        let app = make_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri(&format!("/api/servers/{}/activity", server_id))
+            .header("authorization", format!("Bearer {}", admin_token))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let logs: Vec<ActivityLog> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(logs.len(), 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     async fn test_all_activity_requires_admin(pool: sqlx::PgPool) {
         let (_user_id, token) = seed_user(&pool).await;
         let state = make_state(pool).await;
