@@ -22,6 +22,9 @@ regex        = { workspace = true }
 futures-util = { workspace = true }
 rust-embed   = { version = "8", features = ["interpolate-folder-path"] }
 mime_guess   = "2"
+aes-gcm      = { workspace = true }
+rand         = { workspace = true }
+hex          = { workspace = true }
 
 [dev-dependencies]
 tower          = { workspace = true }
